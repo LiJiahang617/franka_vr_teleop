@@ -7,6 +7,7 @@ from lerobot_teleoperator_franka import (
     DynamixelTeleopConfig,
     SpacemouseTeleopConfig,
     OculusTeleopConfig,
+    UnityVRTeleopConfig,
     create_teleop,
     create_teleop_config,
 )
@@ -131,7 +132,17 @@ class RecordConfig:
             self.oculus_ik_ori_weight = placo_cfg.get("ik_ori_weight", 0.5)
             self.oculus_ik_joints_weight = placo_cfg.get("ik_joints_weight", 0.2)
             self.oculus_ik_regularization = placo_cfg.get("ik_regularization", 1e-4)
-        
+
+        elif self.control_mode == "unityvr":
+            uvr_cfg = teleop.get("unityvr_config", {})
+            self.use_gripper = uvr_cfg.get("use_gripper", True)
+            self.pose_scaler = uvr_cfg.get("pose_scaler", [1.0, 1.0])
+            self.channel_signs = uvr_cfg.get("channel_signs", [1, 1, 1, 1, 1, 1])
+            self.oc2base_path = uvr_cfg.get("oc2base_path",
+                "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy")
+            self.unityvr_robot_ip = uvr_cfg.get("robot_ip", "127.0.0.1")
+            self.unityvr_robot_port = uvr_cfg.get("robot_port", 4242)
+
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}")
     
@@ -189,6 +200,15 @@ class RecordConfig:
                 ik_ori_weight=self.oculus_ik_ori_weight,
                 ik_joints_weight=self.oculus_ik_joints_weight,
                 ik_regularization=self.oculus_ik_regularization,
+            )
+        elif self.control_mode == "unityvr":
+            return UnityVRTeleopConfig(
+                use_gripper=self.use_gripper,
+                pose_scaler=self.pose_scaler,
+                channel_signs=self.channel_signs,
+                oc2base_path=self.oc2base_path,
+                robot_ip=self.unityvr_robot_ip,
+                robot_port=self.unityvr_robot_port,
             )
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}")

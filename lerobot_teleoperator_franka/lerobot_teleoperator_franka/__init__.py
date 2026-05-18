@@ -4,6 +4,7 @@ from .config_teleop import (
     DynamixelTeleopConfig,
     SpacemouseTeleopConfig,
     OculusTeleopConfig,
+    UnityVRTeleopConfig,
     FrankaTeleopConfig,  # Legacy compatibility
 )
 
@@ -14,6 +15,7 @@ from .base_teleop import BaseTeleop
 from .dynamixel_teleop import DynamixelTeleop
 from .spacemouse_teleop import SpacemouseTeleop
 from .oculus_teleop import OculusTeleop
+from .unityvr_teleop import UnityVRTeleop
 
 # Factory functions
 from .teleop_factory import create_teleop, create_teleop_config, get_action_features
@@ -27,6 +29,7 @@ __all__ = [
     "DynamixelTeleopConfig",
     "SpacemouseTeleopConfig",
     "OculusTeleopConfig",
+    "UnityVRTeleopConfig",
     "FrankaTeleopConfig",
     # Base class
     "BaseTeleop",
@@ -34,6 +37,7 @@ __all__ = [
     "DynamixelTeleop",
     "SpacemouseTeleop",
     "OculusTeleop",
+    "UnityVRTeleop",
     "FrankaTeleop",
     # Factory functions
     "create_teleop",

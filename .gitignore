@@ -20,3 +20,19 @@ dist/
 # Ignore VSCode and IDE configs
 .vscode/
 .idea/
+
+# === 数采项目补充(Route B 整合) ===
+*.log
+*.bak
+*.bak.*
+*.bak-*
+*.npz
+*.csv
+_*.log
+.stage3_oc2arm_R.*.bak-*
+_hdf5_episodes/
+_lerobot_out/
+_stage3_*
+# 跟踪固定映射本体, 仅忽略其 .bak 备份
+!.stage3_oc2arm_R.npy
+!.stage3_oc2arm_R.meta.json

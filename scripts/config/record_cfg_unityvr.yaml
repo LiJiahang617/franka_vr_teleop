@@ -7,7 +7,7 @@ record:
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
   user_notes:  # any additional notes about the dataset
   fps: 15 # dataset and camera frame rate
-  control_mode: &control_mode "oculus" # "isoteleop" or "spacemouse" or "oculus"
+  control_mode: &control_mode "unityvr" # unityvr(世界系,头显独立) / isoteleop / spacemouse / oculus
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 
   teleop:
@@ -16,7 +16,7 @@ record:
       port: "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
       # hardware_offsets: [0, 0, 0, 0, 0, 0, 0] # The Calibration offsets between the master and the slave robot
       hardware_offsets: [-0.12183455210997171, -0.002845966063342931, -0.06250428305273764, -2.0498354593763044, 0.05259129256457092, 1.9984585428810417, -0.9046528345737315] 
-      use_gripper: &use_gripper True # whether the slave robot can use gripper
+      use_gripper: &use_gripper True # 已开: Bug2旋转+RouteB真机验通(2026-05-18)+控制柜重启后启用夹爪
       joint_ids: [0, 1, 2, 3, 4, 5, 6]
       # joint_offsets: [6.283, 3.142, 0.0, 4.712, 4.712, 6.283, 2.496] # franka hand offsets
       joint_offsets: [6.283, 3.142, -6.283, 4.712, -1.571, 6.283, 3.0] # robotiq hand offsets
@@ -33,6 +33,13 @@ record:
       pose_scaler: [3.0, 2.0]  # scaler for oculus actions [position, attitude]
       channel_signs: [1, 1, 1, -1, -1, 1]  # signs for each axis [x, y, z, rx, ry, rz]
       # channel_signs: [-1, -1, 1, 1, 1, 1] # mirror
+    unityvr_config:
+      use_gripper: *use_gripper
+      pose_scaler: [3.0, 2.0]  # [position, attitude] 与 oculus 同档起步
+      channel_signs: [1, 1, 1, -1, -1, 1]  # [x,y,z,rx,ry,rz]
+      oc2base_path: "/home/ubuntu/Desktop/jhli/.stage3_oc2arm_R.npy"
+      robot_ip: "127.0.0.1"
+      robot_port: 4242
     placo:
       visualize_placo: False
       placo_dt: 0.01
@@ -93,7 +100,7 @@ record:
 
   cameras:
     wrist_cam_serial: "419622073931" # wrist camera serial number 243222071212 344322074412
-    exterior_cam_serial: "243322071821" # exterior camera serial number 243322071821 339322074423
+    exterior_cam_serial: "420122071361" # exterior camera serial number 243322071821 339322074423
     width: 424 # 640 424
     height: 240 # 360 240
 

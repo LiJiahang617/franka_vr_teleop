@@ -15,7 +15,7 @@ from lerobot.cameras.configs import ColorMode, Cv2Rotation
 from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
 
 HOME_JOINT_POSITION = np.array(
-    [1.58472168, -1.56486702, -1.74356186, -2.634835, -0.11180906, 4.2022109, -1.51133597]
+    [-0.032383, 0.309742, -0.028457, -1.616216, 0.001244, 1.563408, 0.832192]
 )
 
 logger = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ class Franka(Robot):
 
         # joint_positions = np.array([1.58472168, -1.56486702, -1.74356186, -2.634835, -0.11180906, 4.2022109, -1.51133597])
         print(f"\nMoving joint positions to: {HOME_JOINT_POSITION} ...\n")
-        self._robot.robot_move_to_joint_positions(positions = HOME_JOINT_POSITION, time_to_go=5.0)
+        self._robot.robot_move_to_joint_positions(positions = HOME_JOINT_POSITION, time_to_go=None)
         self._robot.gripper_goto(
             width=self.config.gripper_max_open,
             speed=self._gripper_speed,
@@ -182,7 +182,7 @@ class Franka(Robot):
             if self.config.use_gripper:
                 features["gripper_position"] = float
             return features
-        elif self.config.control_mode in ["spacemouse", "oculus"]:
+        elif self.config.control_mode in ["spacemouse", "oculus", "unityvr"]:
             features = {}
             # Delta EE pose (always present)
             for axis in ["x", "y", "z", "rx", "ry", "rz"]:
@@ -241,6 +241,8 @@ class Franka(Robot):
                 self._send_action_oculus_joint(action)
             else:
                 self._send_action_cartesian(action)
+        elif self.config.control_mode == "unityvr":
+            self._send_action_cartesian(action)
         else:
             raise ValueError(f"Unsupported control mode: {self.config.control_mode}")
         
@@ -289,7 +291,7 @@ class Franka(Robot):
                 #     force=self._gripper_force,
                 #     blocking=True
                 # )
-                self._robot.robot_move_to_joint_positions(positions = HOME_JOINT_POSITION, time_to_go=5.0)
+                self._robot.robot_move_to_joint_positions(positions = HOME_JOINT_POSITION, time_to_go=None)
                 self._robot.gripper_goto(
                     width=self.config.gripper_max_open,
                     speed=self._gripper_speed,

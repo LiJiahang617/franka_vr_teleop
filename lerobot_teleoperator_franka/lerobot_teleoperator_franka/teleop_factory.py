@@ -12,10 +12,12 @@ from .config_teleop import (
     DynamixelTeleopConfig,
     SpacemouseTeleopConfig,
     OculusTeleopConfig,
+    UnityVRTeleopConfig,
 )
 from .dynamixel_teleop import DynamixelTeleop
 from .spacemouse_teleop import SpacemouseTeleop
 from .oculus_teleop import OculusTeleop
+from .unityvr_teleop import UnityVRTeleop
 
 
 def create_teleop(config: BaseTeleopConfig) -> BaseTeleop:
@@ -39,6 +41,9 @@ def create_teleop(config: BaseTeleopConfig) -> BaseTeleop:
     
     elif isinstance(config, OculusTeleopConfig) or config.control_mode == "oculus":
         return OculusTeleop(config if isinstance(config, OculusTeleopConfig) else OculusTeleopConfig())
+
+    elif isinstance(config, UnityVRTeleopConfig) or config.control_mode == "unityvr":
+        return UnityVRTeleop(config if isinstance(config, UnityVRTeleopConfig) else UnityVRTeleopConfig())
     
     else:
         raise ValueError(f"Unsupported control mode: {config.control_mode}. "
@@ -65,6 +70,8 @@ def create_teleop_config(control_mode: str, **kwargs) -> BaseTeleopConfig:
         return SpacemouseTeleopConfig(**kwargs)
     elif control_mode == "oculus":
         return OculusTeleopConfig(**kwargs)
+    elif control_mode == "unityvr":
+        return UnityVRTeleopConfig(**kwargs)
     else:
         raise ValueError(f"Unsupported control mode: {control_mode}. "
                         f"Supported modes: isoteleop, spacemouse, oculus")
