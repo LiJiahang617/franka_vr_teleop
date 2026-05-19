@@ -22,3 +22,12 @@ def test_resolve_fps_rejects_nonpositive():
         rp.resolve_record_fps(None, 0)
     with pytest.raises(ValueError):
         rp.resolve_record_fps(-1.0, 30)
+
+
+def test_resolve_fps_rejects_non_finite():
+    # nan/inf 会穿过 fps<=0(nan<=0 为 False; inf 致 1.0/fps=0 忙循环) → 必须显式拒
+    import pytest
+    with pytest.raises(ValueError):
+        rp.resolve_record_fps(None, float("nan"))
+    with pytest.raises(ValueError):
+        rp.resolve_record_fps(float("inf"), 30)

@@ -1,4 +1,6 @@
 """录制超参纯函数(可单测, 不依赖硬件/lerobot)。"""
+import math
+
 import numpy as np
 
 
@@ -7,8 +9,8 @@ def resolve_record_fps(cli_fps, cfg_fps):
     相机 fps / 循环节拍 / hdf5 target_fps 都应取本函数结果, 保证同源一致。
     """
     fps = float(cli_fps) if cli_fps is not None else float(cfg_fps)
-    if fps <= 0:
-        raise ValueError(f"record fps 必须 >0, 得到 {fps}")
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError(f"record fps 必须为有限正数, 得到 {fps}")
     return fps
 
 
