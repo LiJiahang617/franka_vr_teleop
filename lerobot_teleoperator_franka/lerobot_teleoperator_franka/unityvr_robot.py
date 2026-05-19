@@ -4,7 +4,6 @@ import logging
 import numpy as np
 
 # §11.1: vr_align/unity_vr_reader 已入本包，包内相对导入，无需 sys.path hack
-_JHLI = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"  # 标定文件路径常量
 from . import vr_align
 from .unity_vr_reader import UnityVRReader
 
@@ -15,7 +14,7 @@ DOF = 7
 
 
 class UnityVRRobot:
-    def __init__(self, oc2base_path=f"{_JHLI}/.stage3_oc2arm_R.npy",
+    def __init__(self, oc2base_path="/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy",
                  pose_scaler=(1.0, 1.0), channel_signs=(1, 1, 1, 1, 1, 1),
                  use_gripper=True, robot_ip="127.0.0.1", robot_port=4242):
         loaded = vr_align.load_rotation(oc2base_path)
