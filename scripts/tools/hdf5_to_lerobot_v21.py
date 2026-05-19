@@ -15,6 +15,8 @@ CLI 用法：
 
 import json
 import math
+import glob
+import logging
 import os
 import subprocess
 import sys
@@ -26,11 +28,15 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# 自举：确保 <repo>/scripts 在 sys.path 中（同 v3.0 模式）
+# 自举：确保 <repo>/scripts 和 repo 根在 sys.path 中
 _REPO_SCRIPTS = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_REPO_SCRIPTS))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
+from franka_hdf5_schema import validate_episode
 from tools.hdf5_lerobot_map import ACTION_KEYS, OBS_STATE_KEYS, hdf5_frame_to_lerobot
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -506,19 +512,24 @@ def convert(
 ) -> None:
     """将 in_dir 下所有 franka-hdf5-v1 episode 转换为 lerobot v2.1 数据集。
 
+    不合规 episode（validate_episode 返回非空 violations）预校验跳过，不分配输出索引。
+    通过校验但处理失败的 episode（parquet/video 异常）则 fail-loud 中止整个 convert。
+
     Args:
         in_dir: 含 .h5 文件的目录（Path 或 str）
         out: 输出根目录（Path 或 str）
-        fps: 帧率（用于 parquet timestamp 与 info.json）
+        fps: 帧率（必须为整数，用于 parquet timestamp 与 info.json）
         task: 任务描述字符串（所有 episode 共用）
         robot_type: 机器人类型（写入 info.json robot_type 字段）
         state_layout: "native" 或 "realman"（仅影响 state 列序/命名，action 恒 7D 不变）
 
     Raises:
-        ValueError: in_dir 中无 .h5 文件
+        ValueError: fps 非整数；in_dir 中无 .h5 文件；所有 episode 均不合规
     """
-    import glob
-    import logging
+    # fps 整数校验（realman v2.1 约定）
+    if float(fps) != int(fps):
+        raise ValueError(f"convert: fps 必须为整数(realman v2.1 约定), got {fps}")
+    fps = int(fps)
 
     in_dir = Path(in_dir)
     out = Path(out)
@@ -527,18 +538,6 @@ def convert(
     h5_files = sorted(glob.glob(str(in_dir / "*.h5")))
     if not h5_files:
         raise ValueError(f"no hdf5 in {in_dir}")
-
-    # ── 读首个 episode 获取相机名与图像尺寸 ──
-    with h5py.File(h5_files[0], "r") as h5:
-        cam_names = sorted(h5["observations/camera/rgb"].keys())
-        # 解码首帧获取 H×W（供 build_info_json cam_specs）
-        first_bytes = bytes(h5[f"observations/camera/rgb/{cam_names[0]}/images"][0])
-        frame0_bgr = cv2.imdecode(np.frombuffer(first_bytes, np.uint8), cv2.IMREAD_COLOR)
-        if frame0_bgr is None:
-            raise ValueError(f"convert: 首 episode 首帧 jpeg 解码失败 ({h5_files[0]})")
-        H, W = frame0_bgr.shape[:2]
-
-    cam_specs = {cam: (H, W, 3) for cam in cam_names}
 
     # ── state/action names（决定 info.json 中 features names 字段）──
     if state_layout == "realman":
@@ -561,53 +560,89 @@ def convert(
     (out / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
 
     # ── 逐 episode 转换 ──
-    episodes_rows = []   # [(ei, [task], N), ...]
-    stats_rows = []      # [{"episode_index": ei, "stats": {...}}, ...]
+    episodes_rows = []   # [(out_ei, [task], N), ...]
+    stats_rows = []      # [{"episode_index": out_ei, "stats": {...}}, ...]
     total_frames = 0
     index_base = 0       # 全局帧索引累加器
+    out_ei = 0           # 输出 episode 索引（仅对通过校验+成功处理的 episode 递增）
 
-    for ei, h5_path in enumerate(h5_files):
-        out_parquet = out / "data" / "chunk-000" / f"episode_{ei:06d}.parquet"
+    # 首个通过校验的 episode 确定相机名与尺寸（用于后续一致性校验）
+    cam_names = None
+    H = W = None
+    cam_specs = None
 
-        # parquet 转换（stat_arrays 用于 compute_episode_stats）
-        try:
-            N, stat_arrays = episode_to_parquet(
-                h5_path=h5_path,
-                out_parquet=str(out_parquet),
-                episode_index=ei,
-                task_index=0,
-                fps=fps,
-                cam_names=cam_names,
-                task=task,
-                index_base=index_base,
-                state_layout=state_layout,
+    for src_idx, h5_path in enumerate(h5_files):
+        # ── 预校验：不合规直接跳过，不分配 out 索引 ──
+        violations = validate_episode(h5_path)
+        if violations:
+            logging.warning(
+                f"convert: 跳过不合规 episode {h5_path} "
+                f"(violations: {violations})"
             )
-        except Exception as e:
-            logging.warning(f"convert: 跳过 {h5_path}（parquet 失败）: {e}")
             continue
 
-        # 视频导出
-        try:
-            episode_to_videos(
-                h5_path=h5_path,
-                out_dir=str(out),
-                episode_chunk=0,
-                episode_index=ei,
-                cam_names=cam_names,
-                fps=int(fps),
-            )
-        except Exception as e:
-            logging.warning(f"convert: 跳过 {h5_path}（video 失败）: {e}")
-            # parquet 已写，视频失败不回滚（保持与 parquet 产物一致性）
+        # ── 首个合规 episode：确定相机名与图像尺寸 ──
+        if cam_names is None:
+            with h5py.File(h5_path, "r") as h5:
+                cam_names = sorted(h5["observations/camera/rgb"].keys())
+                first_bytes = bytes(h5[f"observations/camera/rgb/{cam_names[0]}/images"][0])
+                frame0_bgr = cv2.imdecode(np.frombuffer(first_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if frame0_bgr is None:
+                    raise ValueError(
+                        f"convert: 首 episode 首帧 jpeg 解码失败 ({h5_path})"
+                    )
+                H, W = frame0_bgr.shape[:2]
+            cam_specs = {cam: (H, W, 3) for cam in cam_names}
+        else:
+            # ── 后续 episode：校验相机名与尺寸一致性 ──
+            with h5py.File(h5_path, "r") as h5:
+                ep_cams = sorted(h5["observations/camera/rgb"].keys())
+                first_bytes = bytes(h5[f"observations/camera/rgb/{ep_cams[0]}/images"][0])
+                frame_bgr = cv2.imdecode(np.frombuffer(first_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if ep_cams != cam_names or (frame_bgr is not None and frame_bgr.shape[:2] != (H, W)):
+                h2, w2 = (frame_bgr.shape[:2] if frame_bgr is not None else (None, None))
+                raise ValueError(
+                    f"convert: {h5_path} 相机/尺寸与首 episode 不一致: "
+                    f"cams={ep_cams} hw={(h2, w2)} vs {cam_names}/{(H, W)}"
+                )
+
+        out_parquet = out / "data" / "chunk-000" / f"episode_{out_ei:06d}.parquet"
+
+        # parquet 转换（fail-loud：通过校验的 episode 处理失败属 bug/数据损坏）
+        N, stat_arrays = episode_to_parquet(
+            h5_path=h5_path,
+            out_parquet=str(out_parquet),
+            episode_index=out_ei,
+            task_index=0,
+            fps=fps,
+            cam_names=cam_names,
+            task=task,
+            index_base=index_base,
+            state_layout=state_layout,
+        )
+
+        # 视频导出（fail-loud）
+        episode_to_videos(
+            h5_path=h5_path,
+            out_dir=str(out),
+            episode_chunk=0,
+            episode_index=out_ei,
+            cam_names=cam_names,
+            fps=fps,
+        )
 
         # 收集元数据
-        episodes_rows.append((ei, [task], N))
+        episodes_rows.append((out_ei, [task], N))
         stats_rows.append({
-            "episode_index": ei,
+            "episode_index": out_ei,
             "stats": compute_episode_stats(stat_arrays),
         })
         total_frames += N
         index_base += N
+        out_ei += 1
+
+    if out_ei == 0:
+        raise ValueError("convert: 无有效 episode(全部未通过 schema 校验)")
 
     total_episodes = len(episodes_rows)
 

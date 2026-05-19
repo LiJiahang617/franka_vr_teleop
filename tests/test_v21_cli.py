@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import h5py
@@ -104,6 +105,39 @@ def _make_two_episodes(in_dir: Path, cams=("exterior_image", "wrist_image")):
     in_dir.mkdir(parents=True, exist_ok=True)
     _make_hdf5(in_dir / "ep_000.h5", n_frames=3, cams=cams)
     _make_hdf5(in_dir / "ep_001.h5", n_frames=4, cams=cams)
+
+
+def _make_invalid_hdf5(h5_path: Path, n_frames: int = 3):
+    """生成不合规 hdf5（缺 action/delta_ee_pose，validate_episode 必返回非空 violations）。"""
+    import franka_hdf5_schema as S
+    vlen_u8 = h5py.special_dtype(vlen=np.dtype("uint8"))
+    img_bgr = np.zeros((16, 24, 3), np.uint8)
+    ok, enc = cv2.imencode(".jpg", img_bgr)
+    jb = np.frombuffer(enc.tobytes(), np.uint8)
+
+    with h5py.File(h5_path, "w") as f:
+        inf = f.create_group("infos")
+        inf.create_dataset("schema_version", data=np.bytes_(S.SCHEMA_VERSION))
+        inf.create_group("task_info")
+        inf.create_group("camera_params")
+        cal = inf.create_group("calibration")
+        cal.create_dataset("oc2base_R", data=np.eye(3, dtype=np.float64))
+
+        obs = f.create_group("observations")
+        obs.create_dataset("timestamp", data=(np.arange(n_frames, dtype=np.float64) + 1).reshape(n_frames, 1))
+        obs.create_group("arm")
+        obs.create_group("effector")
+        cam_grp = obs.create_group("camera")
+        rgb = cam_grp.create_group("rgb")
+        g = rgb.create_group("exterior_image")
+        d = g.create_dataset("images", (n_frames,), dtype=vlen_u8)
+        for i in range(n_frames):
+            d[i] = jb
+        g.create_dataset("timestamp", data=np.arange(n_frames, dtype=np.float64))
+        obs.create_group("state_hifreq")
+
+        # 故意不建 action 组 → validate_episode 返回 "缺少组 action"
+        # 不建 arm/joints 等 → 多项 violation
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -420,3 +454,95 @@ def test_convert_empty_dir_raises(tmp_path):
     out_dir = tmp_path / "out_empty"
     with pytest.raises(ValueError, match="no hdf5"):
         convert(in_dir=in_dir, out=out_dir, fps=30, task="pick")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Test: review-fix 新增测试（Imp#1-4 + Minor 采纳配套）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_non_integer_fps_rejected(tmp_path):
+    """fps=29.5 非整数 → ValueError 含 'fps'。"""
+    in_dir = tmp_path / "in"
+    _make_two_episodes(in_dir, cams=CAMS)
+    with pytest.raises(ValueError, match="fps"):
+        convert(in_dir=in_dir, out=tmp_path / "out", fps=29.5, task="pick")
+
+
+def test_invalid_episode_skipped_keeps_contiguous_index(tmp_path):
+    """3 个 h5，中间一个不合规 → 产 2 个 episode，索引连续 (0,1)，无 gap。"""
+    in_dir = tmp_path / "in"
+    in_dir.mkdir(parents=True, exist_ok=True)
+    # ep_000 和 ep_002 合规（N=3, N=5），ep_001 不合规
+    _make_hdf5(in_dir / "ep_000.h5", n_frames=3, cams=CAMS)
+    _make_invalid_hdf5(in_dir / "ep_001.h5", n_frames=3)
+    _make_hdf5(in_dir / "ep_002.h5", n_frames=5, cams=CAMS)
+
+    out_dir = tmp_path / "out"
+    convert(in_dir=in_dir, out=out_dir, fps=30, task="pick")
+
+    # info.json 只记录 2 个 episode
+    info = json.loads((out_dir / "meta" / "info.json").read_text())
+    assert info["total_episodes"] == 2, f"total_episodes 应为 2, 实为 {info['total_episodes']}"
+    assert info["total_frames"] == 8, f"total_frames 应为 8(3+5), 实为 {info['total_frames']}"
+
+    # parquet 索引连续：episode_000000(index 0-2), episode_000001(index 3-7)
+    chunk = out_dir / "data" / "chunk-000"
+    assert (chunk / "episode_000000.parquet").exists(), "episode_000000.parquet 不存在"
+    assert (chunk / "episode_000001.parquet").exists(), "episode_000001.parquet 不存在"
+    assert not (chunk / "episode_000002.parquet").exists(), "不应存在 episode_000002.parquet"
+
+    df0 = pq.read_table(chunk / "episode_000000.parquet").to_pydict()
+    df1 = pq.read_table(chunk / "episode_000001.parquet").to_pydict()
+    assert list(df0["index"]) == list(range(0, 3)), "ep0 index 应为 0,1,2"
+    assert list(df1["index"]) == list(range(3, 8)), "ep1 index 应为 3,4,5,6,7"
+    assert list(df0["episode_index"]) == [0, 0, 0], "ep0 episode_index 应全为 0"
+    assert list(df1["episode_index"]) == [1, 1, 1, 1, 1], "ep1 episode_index 应全为 1"
+
+    # episodes.jsonl 两行，episode_index 连续
+    eps = _read_jsonl(out_dir / "meta" / "episodes.jsonl")
+    assert len(eps) == 2
+    assert [r["episode_index"] for r in eps] == [0, 1]
+
+    # 视频只有 2 套（ep_000000 和 ep_000001），无 ep_000002
+    for cam in CAMS:
+        vid_dir = out_dir / "videos" / "chunk-000" / f"observation.images.{cam}"
+        assert (vid_dir / "episode_000000.mp4").exists()
+        assert (vid_dir / "episode_000001.mp4").exists()
+        assert not (vid_dir / "episode_000002.mp4").exists()
+
+
+def test_processing_error_fails_loud(tmp_path):
+    """通过 schema 校验但 episode_to_videos 抛异常 → convert fail-loud（不静默跳过）。"""
+    import tools.hdf5_to_lerobot_v21 as mod
+
+    in_dir = tmp_path / "in"
+    _make_two_episodes(in_dir, cams=CAMS)
+    out_dir = tmp_path / "out"
+
+    # monkeypatch episode_to_videos 抛异常（模拟 ffmpeg 不可用等）
+    with mock.patch.object(mod, "episode_to_videos", side_effect=RuntimeError("ffmpeg 崩溃")):
+        with pytest.raises(RuntimeError, match="ffmpeg 崩溃"):
+            convert(in_dir=in_dir, out=out_dir, fps=30, task="pick")
+
+
+def test_inconsistent_camera_shape_fails_loud(tmp_path):
+    """第二个 episode 图像尺寸与首个不一致 → ValueError 含 '不一致'。"""
+    in_dir = tmp_path / "in"
+    in_dir.mkdir(parents=True, exist_ok=True)
+    # ep0: 16x24，ep1: 32x48（尺寸不同）
+    _make_hdf5(in_dir / "ep_000.h5", n_frames=3, cams=CAMS, img_hw=(16, 24))
+    _make_hdf5(in_dir / "ep_001.h5", n_frames=3, cams=CAMS, img_hw=(32, 48))
+
+    with pytest.raises(ValueError, match="不一致"):
+        convert(in_dir=in_dir, out=tmp_path / "out", fps=30, task="pick")
+
+
+def test_all_invalid_raises(tmp_path):
+    """全部 episode 不合规 → ValueError 含 '无有效 episode'。"""
+    in_dir = tmp_path / "in"
+    in_dir.mkdir(parents=True, exist_ok=True)
+    _make_invalid_hdf5(in_dir / "ep_000.h5")
+    _make_invalid_hdf5(in_dir / "ep_001.h5")
+
+    with pytest.raises(ValueError, match="无有效 episode"):
+        convert(in_dir=in_dir, out=tmp_path / "out", fps=30, task="pick")
