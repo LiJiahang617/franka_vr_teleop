@@ -22,11 +22,22 @@ import cv2
 import numpy as np
 import yaml
 
+# 先于把仓库根注入 sys.path, 解析两个 editable 安装的包并锁进 sys.modules。
+# 根因: 仓库根含与包同名的外层目录 lerobot_robot_franka/ 与
+# lerobot_teleoperator_franka/ (均无 __init__.py)。一旦仓库根进 sys.path,
+# 标准 PathFinder 把它当命名空间包返回 spec, 遮蔽 PEP660 editable 真包,
+# 导致 from lerobot_robot_franka import FrankaConfig 报 unknown location。
+# 此刻仓库根尚未进 sys.path, editable finder 正常解析; 之后
+# from lerobot_robot_franka import ... 命中 sys.modules 缓存。
+# 详见 docs/lessons/2026-05-19-namespace-dir-shadows-editable-install.md
+import lerobot_robot_franka  # noqa: F401,E402
+import lerobot_teleoperator_franka  # noqa: F401,E402
+
 sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop")
 sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts")
 
 from core.hdf5_writer import HDF5EpisodeWriter
-from core.record_params import resolve_record_fps, extract_joint_vel
+from core.record_params import resolve_record_fps, extract_joint_vel, realsense_fps
 
 # 复用既有 run_record 的 RecordConfig 和构造工具
 from run_record import RecordConfig
@@ -49,7 +60,7 @@ def build_robot_and_teleop(record_cfg: RecordConfig, fps: float):
     # 相机配置（与 run_record.py 完全一致）
     wrist_image_cfg = RealSenseCameraConfig(
         serial_number_or_name=record_cfg.wrist_cam_serial,
-        fps=fps,
+        fps=realsense_fps(fps),
         width=record_cfg.width,
         height=record_cfg.height,
         color_mode=ColorMode.RGB,
@@ -58,7 +69,7 @@ def build_robot_and_teleop(record_cfg: RecordConfig, fps: float):
     )
     exterior_image_cfg = RealSenseCameraConfig(
         serial_number_or_name=record_cfg.exterior_cam_serial,
-        fps=fps,
+        fps=realsense_fps(fps),
         width=record_cfg.width,
         height=record_cfg.height,
         color_mode=ColorMode.RGB,

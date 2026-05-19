@@ -20,3 +20,11 @@ def extract_joint_vel(obs, dof=7):
         return np.array([float(obs[f"joint_{i+1}.vel"]) for i in range(dof)],
                         dtype=np.float64)
     return np.zeros(dof, dtype=np.float64)
+
+
+def realsense_fps(fps):
+    """RealSense 相机帧率适配: pyrealsense2 enable_stream 要求 framerate 为 int,
+    而单一来源 fps 是 float(循环节拍 1.0/fps 与 hdf5 元数据需要)。在相机边界转 int。
+    RealSense 硬件仅支持整数帧率(15/30/60/90), 非整数 fps 本就非法。
+    """
+    return int(round(float(fps)))

@@ -37,7 +37,7 @@ record:
       use_gripper: *use_gripper
       pose_scaler: [3.0, 2.0]  # [position, attitude] 与 oculus 同档起步
       channel_signs: [1, 1, 1, -1, -1, 1]  # [x,y,z,rx,ry,rz]
-      oc2base_path: "/home/ubuntu/Desktop/jhli/.stage3_oc2arm_R.npy"
+      oc2base_path: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy"  # 整合后路径(验通固定映射实际所在; 与代码默认一致)
       robot_ip: "127.0.0.1"
       robot_port: 4242
     placo:

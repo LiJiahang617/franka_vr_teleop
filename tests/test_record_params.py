@@ -45,3 +45,15 @@ def test_extract_joint_vel_missing_falls_back_zeros():
     import numpy as np
     v = rp.extract_joint_vel({'joint_1.pos': 0.0})
     assert v.shape == (7,) and np.allclose(v, 0.0)
+
+
+def test_realsense_fps_returns_int():
+    # Task1 起 resolve_record_fps 恒 float; 相机需 int 否则 pyrealsense2 报 TypeError
+    v = rp.realsense_fps(30.0)
+    assert v == 30 and isinstance(v, int)
+    assert rp.realsense_fps(15) == 15 and isinstance(rp.realsense_fps(15), int)
+
+
+def test_realsense_fps_rounds_near_integer():
+    assert rp.realsense_fps(29.999999) == 30
+    assert rp.realsense_fps(60.4) == 60
