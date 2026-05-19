@@ -233,3 +233,77 @@ def test_unityvr_robot_default_axis_gain_is_unit():
             f"不传增益时 _pos_axis_gain 应默认 [1,1,1]，实际 {robot._pos_axis_gain}")
         assert list(robot._rot_axis_gain) == [1.0, 1.0, 1.0], (
             f"不传增益时 _rot_axis_gain 应默认 [1,1,1]，实际 {robot._rot_axis_gain}")
+
+
+# ================================================================
+# Test 4: _connect_impl 把 cfg 的增益透传给 UnityVRRobot 构造（闭合 config→teleop→robot 链路）
+# ================================================================
+def test_connect_impl_passes_cfg_axis_gain_to_unityvr_robot():
+    """§11.3 Codex Minor#1: UnityVRTeleop._connect_impl 应将 cfg.pos_axis_gain /
+    cfg.rot_axis_gain 原样透传给 UnityVRRobot 构造，闭合 config→teleop→robot 增益链路。
+
+    策略：
+    1. importlib 加载 unityvr_teleop 模块（mock lerobot / base_teleop 等重依赖）；
+    2. 将模块命名空间中的 UnityVRRobot 替换为记录 kwargs 的 FakeUnityVRRobot；
+    3. 构造一个最简 fake_self（有 cfg 属性），直接调用
+       UnityVRTeleop._connect_impl(fake_self) 绕开 BaseTeleop.__init__ 链；
+    4. 断言 FakeUnityVRRobot 收到的 pos_axis_gain / rot_axis_gain 与 cfg 值一致。
+    """
+    cfg_mod = _load_config_teleop()
+
+    # 构造非默认增益的 config，确保断言可区分（非默认值才能证明透传而非巧合）
+    cfg = cfg_mod.UnityVRTeleopConfig()
+    cfg.pos_axis_gain = [2.0, 3.0, 4.0]
+    cfg.rot_axis_gain = [5.0, 6.0, 7.0]
+
+    # 构造最简 fake_self：只需有 cfg 属性（_connect_impl 仅访问 self.cfg.xxx）
+    fake_self = types.SimpleNamespace(cfg=cfg)
+
+    # 构建加载 unityvr_teleop 所需的最小 mock 依赖树
+    # base_teleop 引用了 lerobot.teleoperators.teleoperator，需要 mock 整链
+    fake_teleoperator_mod = types.ModuleType("lerobot.teleoperators.teleoperator")
+    fake_teleoperator_mod.Teleoperator = object  # BaseTeleop 的父类，不需要真实行为
+    fake_base_teleop_mod = types.ModuleType("_fake_base_teleop")
+
+    class _FakeBaseTeleop:
+        pass
+
+    fake_base_teleop_mod.BaseTeleop = _FakeBaseTeleop
+
+    # 假包环境（unityvr_teleop 用相对导入 from .base_teleop import BaseTeleop 等）
+    pkg_name = "_test_uvr_pkg_t4"
+    pkg_mod = types.ModuleType(pkg_name)
+    pkg_mod.__path__ = [_PKG]
+    pkg_mod.__package__ = pkg_name
+    sys.modules[pkg_name] = pkg_mod
+
+    # 注册假子模块：config_teleop 和 base_teleop（供 unityvr_teleop 相对导入）
+    sys.modules[f"{pkg_name}.config_teleop"] = cfg_mod
+    sys.modules[f"{pkg_name}.base_teleop"] = fake_base_teleop_mod
+    sys.modules["lerobot.teleoperators.teleoperator"] = fake_teleoperator_mod
+
+    # 加载 unityvr_teleop 模块
+    teleop_spec = importlib.util.spec_from_file_location(
+        f"{pkg_name}.unityvr_teleop", f"{_PKG}/unityvr_teleop.py",
+        submodule_search_locations=[])
+    teleop_mod = importlib.util.module_from_spec(teleop_spec)
+    teleop_mod.__package__ = pkg_name
+    sys.modules[f"{pkg_name}.unityvr_teleop"] = teleop_mod
+    teleop_spec.loader.exec_module(teleop_mod)
+
+    # 替换 unityvr_teleop 命名空间中的 UnityVRRobot 为记录 kwargs 的 fake
+    captured_calls = []
+    fake_robot_mod = _make_fake_unityvr_robot_module(captured_calls)
+    teleop_mod.UnityVRRobot = fake_robot_mod.UnityVRRobot
+
+    # 直接调用 _connect_impl（unbound 方式，fake_self 只需有 cfg 属性）
+    teleop_mod.UnityVRTeleop._connect_impl(fake_self)
+
+    # 断言：FakeUnityVRRobot 被调用一次，且 pos/rot_axis_gain 与 cfg 完全一致
+    assert len(captured_calls) == 1, (
+        f"_connect_impl 应构造一次 UnityVRRobot，实际调用 {len(captured_calls)} 次")
+    call = captured_calls[0]
+    assert call["pos_axis_gain"] == [2.0, 3.0, 4.0], (
+        f"_connect_impl 未透传 cfg.pos_axis_gain：期望 [2,3,4]，实际 {call['pos_axis_gain']}")
+    assert call["rot_axis_gain"] == [5.0, 6.0, 7.0], (
+        f"_connect_impl 未透传 cfg.rot_axis_gain：期望 [5,6,7]，实际 {call['rot_axis_gain']}")
