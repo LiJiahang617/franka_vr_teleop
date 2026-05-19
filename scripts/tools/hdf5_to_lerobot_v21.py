@@ -28,15 +28,11 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# 自举：确保 <repo>/scripts 和 repo 根在 sys.path 中
+# 自举：确保 <repo>/scripts 在 sys.path 中（core.* 解析需要；scripts 下无与已安装包同名目录，不触发遮蔽）
 _REPO_SCRIPTS = Path(__file__).resolve().parents[1]
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_REPO_SCRIPTS))
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
-from franka_hdf5_schema import validate_episode
 from tools.hdf5_lerobot_map import ACTION_KEYS, OBS_STATE_KEYS, hdf5_frame_to_lerobot
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -571,9 +567,12 @@ def convert(
     H = W = None
     cam_specs = None
 
+    from core.schema_loader import load_franka_hdf5_schema
+    _schema = load_franka_hdf5_schema()
+
     for src_idx, h5_path in enumerate(h5_files):
         # ── 预校验：不合规直接跳过，不分配 out 索引 ──
-        violations = validate_episode(h5_path)
+        violations = _schema.validate_episode(h5_path)
         if violations:
             logging.warning(
                 f"convert: 跳过不合规 episode {h5_path} "
