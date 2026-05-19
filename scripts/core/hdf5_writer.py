@@ -5,16 +5,8 @@ import sys
 import h5py
 import numpy as np
 
-import importlib.util as _ilu, os as _os
-if 'franka_hdf5_schema' in sys.modules:
-    S = sys.modules['franka_hdf5_schema']  # 复用单一实例(还原旧 import 缓存语义)
-else:
-    _schema_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
-        _os.path.abspath(__file__)))), 'franka_hdf5_schema.py')
-    _spec = _ilu.spec_from_file_location('franka_hdf5_schema', _schema_path)
-    S = _ilu.module_from_spec(_spec)
-    sys.modules['franka_hdf5_schema'] = S  # exec 前注册(importlib 规范, 防重复实例)
-    _spec.loader.exec_module(S)  # noqa: E402
+from core.schema_loader import load_franka_hdf5_schema
+S = load_franka_hdf5_schema()
 
 _VLEN_BYTES = h5py.special_dtype(vlen=np.dtype("uint8"))
 

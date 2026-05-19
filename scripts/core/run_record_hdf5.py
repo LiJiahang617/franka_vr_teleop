@@ -22,10 +22,10 @@ import cv2
 import numpy as np
 import yaml
 
-import os as _os
-sys.path.insert(0, _os.path.join(
-    _os.environ.get('FRANKA_JHLI_ROOT', '/home/ubuntu/Desktop/jhli'),
-    'lerobot_franka_teleop', 'scripts'))
+from pathlib import Path as _Path
+# run_record_hdf5.py 在 <repo>/scripts/core/ ; scripts 目录(=parents[1])上 path
+# 供 core.* / run_record 解析(结构固定, 用 __file__ 相对优于硬编码/env)。
+sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 
 from core import paths as _paths
 from core.hdf5_writer import HDF5EpisodeWriter

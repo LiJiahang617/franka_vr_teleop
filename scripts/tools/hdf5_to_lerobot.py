@@ -20,20 +20,13 @@ import logging
 import sys
 import h5py
 
-import os as _os
-sys.path.insert(0, _os.path.join(
-    _os.environ.get('FRANKA_JHLI_ROOT', '/home/ubuntu/Desktop/jhli'),
-    'lerobot_franka_teleop', 'scripts'))
-import importlib.util as _ilu
-if 'franka_hdf5_schema' in sys.modules:
-    S = sys.modules['franka_hdf5_schema']  # 复用单一实例(还原旧 import 缓存语义)
-else:
-    _schema_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
-        _os.path.abspath(__file__)))), 'franka_hdf5_schema.py')
-    _spec = _ilu.spec_from_file_location('franka_hdf5_schema', _schema_path)
-    S = _ilu.module_from_spec(_spec)
-    sys.modules['franka_hdf5_schema'] = S  # exec 前注册(importlib 规范, 防重复实例)
-    _spec.loader.exec_module(S)  # noqa: E402
+from pathlib import Path as _Path
+# hdf5_to_lerobot.py 在 <repo>/scripts/tools/ ; scripts 目录(=parents[1])上 path
+# 供 `from tools.hdf5_lerobot_map import ...`(下一行)解析; schema 加载另由
+# schema_loader 经 __file__ 相对定位, 与此 sys.path 互不依赖。
+sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+from core.schema_loader import load_franka_hdf5_schema
+S = load_franka_hdf5_schema()
 from tools.hdf5_lerobot_map import build_feature_specs, hdf5_frame_to_lerobot
 
 log = logging.getLogger("h5->lerobot")
