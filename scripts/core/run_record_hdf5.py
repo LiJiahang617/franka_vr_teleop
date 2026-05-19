@@ -104,8 +104,14 @@ def build_robot_and_teleop(record_cfg: RecordConfig, fps: float):
 
 
 def _encode_jpg(img: np.ndarray) -> np.ndarray:
-    """将 numpy 图像数组编码为 jpeg bytes (uint8 array)。"""
-    ok, buf = cv2.imencode(".jpg", img)
+    """将相机 RGB 图像编码为 jpeg bytes (uint8 array)。
+
+    相机 color_mode=ColorMode.RGB → img 为 RGB; cv2.imencode 按 OpenCV 惯例
+    默认输入 BGR, 故须先 RGB→BGR。否则下游 hdf5_lerobot_map._decode 的
+    imdecode(BGR)+cvtColor(BGR2RGB) 会净多一次 R↔B 互换 (黄变青)。
+    """
+    bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode(".jpg", bgr)
     if not ok:
         raise RuntimeError("cv2.imencode('.jpg') 失败")
     return np.frombuffer(buf.tobytes(), np.uint8)
