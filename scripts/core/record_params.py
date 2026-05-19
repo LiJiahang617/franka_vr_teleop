@@ -74,3 +74,88 @@ def parse_reset_config(rec_raw: dict):
                 f"record.reset_wait 必须为有限非负数, got {rw!r}"
             )
     return rbe, rw
+
+
+# ================================================================
+# 严格解析 helpers（Phase C review-fix: 真机配置鲁棒，fail-loud）
+# ================================================================
+
+DEFAULT_STATE_HIFREQ_RATE = 240
+
+
+def parse_bool(value, default: bool = True, *, key_name: str = "value"):
+    """严格解析配置 bool: 防 yaml 引号字符串 "false" 被 bool() 误判 True。
+
+    True: True/"true"/"True"/"1"/"yes"/"on"；False: False/"false"/"False"/"0"/"no"/"off"；
+    None: 取 default。其它(int/list/...): raise ValueError 带 key_name 上下文。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+        raise ValueError(
+            f"{key_name} 非法 bool 字符串: {value!r}（应为 true/false/1/0/yes/no/on/off）"
+        )
+    raise ValueError(f"{key_name} 必须为 bool, got {type(value).__name__}={value!r}")
+
+
+def parse_section_dict(value, *, key_name: str) -> dict:
+    """归一化 yaml 子段为 dict: None→{}, dict→自身, 其他→ValueError（fail-loud 防链式 .get 崩）。"""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    raise ValueError(
+        f"{key_name} 必须为 dict 或 null, got {type(value).__name__}={value!r}"
+    )
+
+
+def parse_positive_int(value, default: int, *, key_name: str) -> int:
+    """严格正整数: None→default; bool 拒绝(避 True/False→1/0 误用); 其它必须可转 int 且 >0。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):  # bool 是 int 子类，特判防 True→1/False→0 误用
+        raise ValueError(f"{key_name} 必须为 int>0, got bool {value!r}")
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key_name} 必须可转 int, got {type(value).__name__}={value!r}")
+    if v <= 0:
+        raise ValueError(f"{key_name} 必须 > 0, got {v}")
+    return v
+
+
+def parse_axis_gain(value, *, key_name: str, default=(1.0, 1.0, 1.0)) -> list:
+    """严格解析 per-axis 增益: None→default; list/tuple 必须 len==3 元素全有限数。
+
+    config-load 时 fail-loud (vs T1 compute_delta_action 的运行时 fail) = 两层防御，
+    早失败避坏增益喂真机运动（同 Phase B-T5 parse_reset_config 真机配置鲁棒 ethos）。
+    """
+    if value is None:
+        return [float(x) for x in default]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            f"{key_name} 必须为 list/tuple, got {type(value).__name__}={value!r}"
+        )
+    if len(value) != 3:
+        raise ValueError(
+            f"{key_name} 必须 len==3 [x,y,z]/[rx,ry,rz], got len={len(value)}: {value!r}"
+        )
+    out = []
+    for i, x in enumerate(value):
+        if isinstance(x, bool):  # bool 子类特判
+            raise ValueError(f"{key_name}[{i}] 必须为数字, got bool {x!r}")
+        try:
+            xf = float(x)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key_name}[{i}] 必须可转 float, got {type(x).__name__}={x!r}")
+        if not math.isfinite(xf):
+            raise ValueError(f"{key_name}[{i}] 必须有限(非 nan/inf), got {xf!r}")
+        out.append(xf)
+    return out

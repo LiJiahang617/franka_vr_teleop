@@ -28,6 +28,14 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.processor.rename_processor import rename_stats
 from dataclasses import field
+from core.record_params import (
+    parse_reset_config,
+    parse_bool,
+    parse_section_dict,
+    parse_positive_int,
+    parse_axis_gain,
+    DEFAULT_STATE_HIFREQ_RATE,
+)
 
 import logging
 
@@ -83,6 +91,7 @@ class RecordConfig:
         self.reset_time_sec: int = time.get("reset_time_sec", 10)
         # 注意：yaml 实际键为 save_meta_period，此处 save_mera_period 为既有拼写 bug，
         # Phase C 不修（修改会破坏 run_record.py 另一入口行为 = 违反向后兼容红线）
+        # TODO(Phase 后续/统一入口时): 修正拼写为 save_meta_period 并改 yaml
         self.save_mera_period: int = time.get("save_mera_period", 1)
         
         # Cameras config
@@ -94,22 +103,30 @@ class RecordConfig:
         # Storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
 
-        # Phase C 扩展字段（全 cfg.get 带默认，向后兼容；run_record.py 走
-        # record_cfg.yaml 缺新键时取默认，行为零变化）
-        self.out_dir = cfg.get("out_dir", None)
-        self.depth_enabled: bool = bool(cfg.get("depth", {}).get("enabled", False))
-        self.state_hifreq_enabled: bool = bool(
-            cfg.get("state_hifreq", {}).get("enabled", False))
-        self.state_hifreq_rate: int = int(
-            cfg.get("state_hifreq", {}).get("rate", 240))
+        # Phase C 扩展字段（严格解析, 全 fail-loud, 守 Phase B-T5 真机配置鲁棒 ethos）
+        self.out_dir = cfg.get("out_dir", None)  # None=下游(Task4 resolve_record_overrides)
+                                                  # 回退 paths.HDF5_EPISODES_DIR;
+                                                  # contract: 消费方须 is None 检查并回退
+        depth_cfg = parse_section_dict(cfg.get("depth"), key_name="record.depth")
+        self.depth_enabled = parse_bool(
+            depth_cfg.get("enabled"), default=False, key_name="record.depth.enabled"
+        )
+        sh_cfg = parse_section_dict(cfg.get("state_hifreq"), key_name="record.state_hifreq")
+        self.state_hifreq_enabled = parse_bool(
+            sh_cfg.get("enabled"), default=False, key_name="record.state_hifreq.enabled"
+        )
+        self.state_hifreq_rate = parse_positive_int(
+            sh_cfg.get("rate"), default=DEFAULT_STATE_HIFREQ_RATE, key_name="record.state_hifreq.rate"
+        )
         # depth/state_hifreq 仅 RecordConfig 占位键，不写 hdf5/不进 schema，Phase D 才消费
 
         # reset 配置：经 parse_reset_config 纯函数解析（单一真源在 record_params）
-        from core.record_params import parse_reset_config as _parse_reset
-        self.reset_between_episodes, self.reset_wait = _parse_reset(cfg)
+        self.reset_between_episodes, self.reset_wait = parse_reset_config(cfg)
 
-        # 颜色预检开关（缺省 True = 预检开启）
-        self.color_preflight: bool = bool(cfg.get("color_preflight", True))
+        # 颜色预检开关（严格解析防 yaml 引号 "false" 误判；缺省 True = 预检开启）
+        self.color_preflight = parse_bool(
+            cfg.get("color_preflight"), default=True, key_name="record.color_preflight"
+        )
     
     def _parse_teleop_config(self, teleop: Dict[str, Any]) -> None:
         """Parse teleoperation configuration based on control mode."""
@@ -161,10 +178,16 @@ class RecordConfig:
                 "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy")
             self.unityvr_robot_ip = uvr_cfg.get("robot_ip", "127.0.0.1")
             self.unityvr_robot_port = uvr_cfg.get("robot_port", 4242)
-            # §11.3 每轴增益（默认全1=等价历史 pose_scaler 两标量行为；§10.2(0) 红线:
-            # 增益仅在已验通映射输出后逐轴缩放，不改 _POS_MAP/R_cal 方向/手性）
-            self.pos_axis_gain = uvr_cfg.get("pos_axis_gain", [1.0, 1.0, 1.0])
-            self.rot_axis_gain = uvr_cfg.get("rot_axis_gain", [1.0, 1.0, 1.0])
+            # §11.3 每轴增益（严格解析: len==3+finite+numeric, config-load 时 fail-loud;
+            # T1 compute_delta_action 运行时 fail-loud 校验=两层防御; §10.2(0) 红线: 不改方向/手性）
+            self.pos_axis_gain = parse_axis_gain(
+                uvr_cfg.get("pos_axis_gain"),
+                key_name="record.teleop.unityvr_config.pos_axis_gain",
+            )
+            self.rot_axis_gain = parse_axis_gain(
+                uvr_cfg.get("rot_axis_gain"),
+                key_name="record.teleop.unityvr_config.rot_axis_gain",
+            )
 
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}")

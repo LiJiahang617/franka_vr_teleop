@@ -366,3 +366,66 @@ def test_record_config_pose_scaler_still_default():
     m = _load_run_record()
     rc = m.RecordConfig(_minimal_cfg())
     assert list(rc.pose_scaler) == [3.0, 2.0], f"pose_scaler 被破坏，实际 {rc.pose_scaler}"
+
+
+# ================================================================
+# Phase C review-fix 新增边界测试（验证 helpers 在 RecordConfig 层生效）
+# ================================================================
+
+def test_depth_null_not_attribute_error():
+    """cfg depth: None → parse_section_dict 转空 dict，不 AttributeError，depth_enabled=False。"""
+    m = _load_run_record()
+    rc = m.RecordConfig(_minimal_cfg(rec_overrides={"depth": None}))
+    assert rc.depth_enabled is False
+
+
+def test_depth_non_dict_raises():
+    """cfg depth: "bad" → parse_section_dict → ValueError（fail-loud）。"""
+    m = _load_run_record()
+    with pytest.raises(ValueError):
+        m.RecordConfig(_minimal_cfg(rec_overrides={"depth": "bad"}))
+
+
+def test_state_hifreq_null_safe():
+    """cfg state_hifreq: None → parse_section_dict 转空 dict，取默认 enabled=False, rate=240。"""
+    m = _load_run_record()
+    rc = m.RecordConfig(_minimal_cfg(rec_overrides={"state_hifreq": None}))
+    assert rc.state_hifreq_enabled is False
+    assert rc.state_hifreq_rate == 240
+
+
+def test_state_hifreq_rate_zero_raises():
+    """state_hifreq.rate: 0 → parse_positive_int → ValueError（fail-loud）。"""
+    m = _load_run_record()
+    with pytest.raises(ValueError, match="必须 > 0"):
+        m.RecordConfig(_minimal_cfg(rec_overrides={"state_hifreq": {"enabled": True, "rate": 0}}))
+
+
+def test_state_hifreq_rate_negative_raises():
+    """state_hifreq.rate: -1 → parse_positive_int → ValueError（fail-loud）。"""
+    m = _load_run_record()
+    with pytest.raises(ValueError, match="必须 > 0"):
+        m.RecordConfig(_minimal_cfg(rec_overrides={"state_hifreq": {"enabled": True, "rate": -1}}))
+
+
+def test_color_preflight_string_false_correctly_false():
+    """color_preflight: "false"（yaml 引号字符串）→ parse_bool → False，防 bool("false")==True 误判。"""
+    m = _load_run_record()
+    rc = m.RecordConfig(_minimal_cfg(rec_overrides={"color_preflight": "false"}))
+    assert rc.color_preflight is False, (
+        f'color_preflight="false" 应解析为 False，实际 {rc.color_preflight!r}（parse_bool 未生效？）'
+    )
+
+
+def test_pos_axis_gain_wrong_length_raises_at_config():
+    """pos_axis_gain len!=3 → config-load 时即 ValueError（非延后到运行时）。"""
+    m = _load_run_record()
+    with pytest.raises(ValueError, match="len==3"):
+        m.RecordConfig(_minimal_cfg(uvr_overrides={"pos_axis_gain": [1.0, 2.0]}))
+
+
+def test_pos_axis_gain_nan_raises_at_config():
+    """pos_axis_gain 含 nan → config-load 时即 ValueError（有限性检查）。"""
+    m = _load_run_record()
+    with pytest.raises(ValueError, match="有限"):
+        m.RecordConfig(_minimal_cfg(uvr_overrides={"pos_axis_gain": [1.0, float("nan"), 1.0]}))
