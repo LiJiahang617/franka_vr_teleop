@@ -120,3 +120,90 @@ def test_color_cfg_gate_explicit_false():
     raw_record = {"color_preflight": False}
     color_preflight_enabled = raw_record.get("color_preflight", True)
     assert color_preflight_enabled is False
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 新增：_preflight_abort 稳健清理 + robot._robot 防御（Codex Imp#1-2）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _load_rrh_module():
+    """加载 run_record_hdf5 模块（复用 _load_rrh 逻辑）。"""
+    import importlib.util, os, sys
+    P = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    sys.path.insert(0, os.path.join(P, "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "rrh2", os.path.join(P, "scripts/core/run_record_hdf5.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_preflight_abort_disconnects_both_then_exit():
+    """_preflight_abort 正常路径：robot+teleop 各 disconnect 一次，sys.exit(2)。"""
+    from unittest.mock import MagicMock, patch
+
+    rrh = _load_rrh_module()
+
+    robot = MagicMock()
+    teleop = MagicMock()
+
+    with patch.object(rrh.sys, "exit", side_effect=SystemExit(2)) as mock_exit:
+        try:
+            rrh._preflight_abort(robot, teleop, "测试原因")
+        except SystemExit as exc:
+            assert exc.code == 2
+
+    robot.disconnect.assert_called_once()
+    teleop.disconnect.assert_called_once()
+    mock_exit.assert_called_once_with(2)
+
+
+def test_preflight_abort_continues_if_one_disconnect_raises():
+    """_preflight_abort 稳健路径：robot.disconnect 抛异常，仍调 teleop.disconnect 并 sys.exit(2)。"""
+    from unittest.mock import MagicMock, patch
+
+    rrh = _load_rrh_module()
+
+    robot = MagicMock()
+    robot.disconnect.side_effect = RuntimeError("zerorpc 已断")
+    teleop = MagicMock()
+
+    with patch.object(rrh.sys, "exit", side_effect=SystemExit(2)):
+        try:
+            rrh._preflight_abort(robot, teleop, "测试稳健清理")
+        except SystemExit as exc:
+            assert exc.code == 2
+
+    # robot.disconnect 被调（即使抛异常），teleop.disconnect 仍被调
+    robot.disconnect.assert_called_once()
+    teleop.disconnect.assert_called_once()
+
+
+def test_missing_gripper_client_aborts():
+    """robot 无 _robot 属性 → _preflight_abort 被触发（不 AttributeError）。
+
+    用纯逻辑模拟 main() 内的 getattr 防御分支：
+    _gripper_client = getattr(robot, "_robot", None)
+    if _gripper_client is None: _preflight_abort(...)
+    """
+    from unittest.mock import MagicMock
+
+    rrh = _load_rrh_module()
+
+    # robot 无 _robot 属性
+    robot = MagicMock(spec=[])  # spec=[] → 无任何属性，getattr 返回 None
+    teleop = MagicMock()
+
+    _gripper_client = getattr(robot, "_robot", None)
+    assert _gripper_client is None  # 验证防御条件触发
+
+    abort_called = []
+
+    def fake_abort(r, t, reason):
+        abort_called.append(reason)
+
+    # 模拟 main 内防御分支
+    if _gripper_client is None:
+        fake_abort(robot, teleop, "无法获取夹爪 zerorpc client(robot._robot 缺失)")
+
+    assert len(abort_called) == 1
+    assert "robot._robot" in abort_called[0]

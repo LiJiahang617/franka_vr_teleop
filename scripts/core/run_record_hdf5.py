@@ -43,6 +43,20 @@ from core.record_params import resolve_record_fps, extract_joint_vel, realsense_
 log = logging.getLogger("rec_hdf5")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+def _preflight_abort(robot, teleop, reason: str) -> None:
+    """预检失败：尽力断开所有已建资源后退出(2)。
+
+    逐个 try/except 确保 robot/teleop 都尝试 disconnect（一个抛不影响另一个），
+    最后稳定 sys.exit(2)（开录前可行动报错，非中途静默失败）。
+    """
+    log.error(f"[PREFLIGHT] {reason}")
+    for name, obj in (("robot", robot), ("teleop", teleop)):
+        try:
+            obj.disconnect()
+        except Exception as e:  # noqa: BLE001 — 清理尽力而为，不掩盖原 reason
+            log.warning(f"[PREFLIGHT] {name}.disconnect() 异常(忽略继续清理): {e}")
+    sys.exit(2)
+
 
 def parse_reset_config(rec_raw: dict):
     """从 record yaml 的 raw dict 解析 reset 配置（纯函数, 可离线单测）。
@@ -395,56 +409,52 @@ def main():
     # §11.2 预检门：robot.connect 后、录制前运行，任一不过 → sys.exit(2)（开录前 ~10s 拦截）
     # 目的：把"中途静默失败"变"启动期可行动报错"，避免录完才发现夹爪/色彩异常
     from core import preflight as pf
+    from tools.hdf5_lerobot_map import _decode as _hdf5_decode  # 接线错=模块级 bug，fail-loud
 
     # 1. 夹爪预检（仅当 use_gripper=True；zerorpc client 由 robot._robot 获取，预检在循环外一次性完成）
     if getattr(record_cfg, "use_gripper", True):
         log.info("[PREFLIGHT] 运行夹爪预检（进程存活/连接就绪/width 真变）…")
+        _gripper_client = getattr(robot, "_robot", None)
+        if _gripper_client is None:
+            _preflight_abort(
+                robot, teleop,
+                "无法获取夹爪 zerorpc client(robot._robot 缺失)→检查 robot 连接/wrapper",
+            )
         gripper_verdict = pf.run_gripper_preflight(
-            client=robot._robot,
+            client=_gripper_client,
             proc_probe=pf.default_proc_probe,
             log_probe=lambda: pf.default_log_probe(
                 "/home/ubuntu/Desktop/jhli/_gripper_live.log"
             ),
         )
         if not gripper_verdict.ok:
-            log.error(f"[PREFLIGHT] 夹爪预检失败: {gripper_verdict.reason}")
-            robot.disconnect()
-            teleop.disconnect()
-            sys.exit(2)
+            _preflight_abort(robot, teleop, f"夹爪预检失败: {gripper_verdict.reason}")
 
     # 2. 色彩预检（默认开启；raw dict 可设 color_preflight: false 关闭）
     color_preflight_enabled = raw.get("record", {}).get("color_preflight", True)
     if color_preflight_enabled:
         log.info("[PREFLIGHT] 采首帧运行色彩通道序预检…")
+        encoded_pf = []
         try:
-            _obs_pf = robot.get_observation()
-            _encoded_pf = []
-            for _cn in cam_names:
-                _img = _obs_pf.get(_cn)
-                if _img is not None and isinstance(_img, np.ndarray):
-                    _encoded_pf.append(_encode_jpg(_img))
-            if _encoded_pf:
-                # _decode 约定：cv2.imdecode(IMREAD_COLOR)(BGR)→cvtColor(BGR2RGB)(RGB)
-                import importlib.util as _ilu
-                _hm_spec = _ilu.spec_from_file_location(
-                    "hdf5_lerobot_map",
-                    str(_Path(__file__).resolve().parents[1] / "tools/hdf5_lerobot_map.py"),
-                )
-                _hm = _ilu.module_from_spec(_hm_spec)
-                _hm_spec.loader.exec_module(_hm)
-                _color_verdict = pf.run_color_preflight(
-                    decode_fn=_hm._decode,
-                    encoded_frames=_encoded_pf,
-                )
-                if not _color_verdict.ok:
-                    log.error(f"[PREFLIGHT] 色彩预检失败: {_color_verdict.reason}")
-                    robot.disconnect()
-                    teleop.disconnect()
-                    sys.exit(2)
-            else:
-                log.warning("[PREFLIGHT] 色彩预检跳过（无可用相机帧）")
-        except Exception as _e:
-            log.warning(f"[PREFLIGHT] 色彩预检异常（弱判据，继续录制）: {_e}")
+            obs_pf = robot.get_observation()
+            for camera_name in cam_names:
+                img = obs_pf.get(camera_name)
+                if img is not None and isinstance(img, np.ndarray):
+                    encoded_pf.append(_encode_jpg(img))
+        except Exception as e:  # noqa: BLE001 — 仅相机观测/采帧失败=弱降级(色彩判据不确定)，继续录制
+            log.warning(f"[PREFLIGHT] 色彩预检采帧异常（弱判据，继续录制）: {e}")
+            encoded_pf = []
+        if encoded_pf:
+            # _hdf5_decode: cv2.imdecode(IMREAD_COLOR)(BGR)→cvtColor(BGR2RGB)(RGB)
+            # 接线错由顶部 import 已 fail-loud，此处调用异常=真 bug，不被 warning 吞
+            color_verdict = pf.run_color_preflight(
+                decode_fn=_hdf5_decode,
+                encoded_frames=encoded_pf,
+            )
+            if not color_verdict.ok:
+                _preflight_abort(robot, teleop, f"色彩预检失败: {color_verdict.reason}")
+        else:
+            log.warning("[PREFLIGHT] 色彩预检跳过（无可用相机帧）")
 
     log.info("[PREFLIGHT] 夹爪/色彩预检通过，开始录制")
 
