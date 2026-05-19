@@ -1,15 +1,12 @@
 """UnityVRRobot：世界系 Quest 控制器 → delta_ee_pose+夹爪 观测，复用 vr_align 标定 R。"""
 import logging
-import sys
 
 import numpy as np
 
-# DRY 接缝：复用 jhli 根的 unity_vr_reader / vr_align（已验收，不复制）
-_JHLI = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
-if _JHLI not in sys.path:
-    sys.path.insert(0, _JHLI)
-import vr_align  # noqa: E402
-from unity_vr_reader import UnityVRReader  # noqa: E402
+# §11.1: vr_align/unity_vr_reader 已入本包，包内相对导入，无需 sys.path hack
+_JHLI = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"  # 标定文件路径常量
+from . import vr_align
+from .unity_vr_reader import UnityVRReader
 
 from . import unityvr_mapping as _m
 

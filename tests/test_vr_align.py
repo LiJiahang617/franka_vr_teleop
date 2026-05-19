@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
-import vr_align
+import lerobot_teleoperator_franka.vr_align as vr_align
 
 
 def test_solve_rotation_recovers_known_R_two_pairs():

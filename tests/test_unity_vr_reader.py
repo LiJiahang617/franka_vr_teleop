@@ -1,5 +1,5 @@
 import numpy as np
-import unity_vr_reader as u
+import lerobot_teleoperator_franka.unity_vr_reader as u
 
 VALID = ("05-18 15:45:35.369 10887 10920 I Unity   : VRDeviceData: RIGHT_POSE "
          "t=(0.135, -0.050, -0.175) r=(0.0, 0.0, 0.0, 1.0) RIGHT_CONTROLLER "

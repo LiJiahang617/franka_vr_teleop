@@ -41,3 +41,14 @@ def test_run_record_hdf5_preimports_before_syspath_insert():
     assert i_pre != -1, "缺少 pre-import 守卫"
     assert i_insert != -1, "未找到仓库根 sys.path.insert"
     assert i_pre < i_insert, "pre-import 必须在 sys.path.insert(repo) 之前"
+
+
+def test_vr_modules_importable_from_teleop_package():
+    # §11.1: vr_align/unity_vr_reader 已入 lerobot_teleoperator_franka 包,
+    # 任意 cwd 经包路径可导入（无需 repo-根-on-sys.path）。
+    r = _probe(
+        "import lerobot_teleoperator_franka.vr_align as a;"
+        "import lerobot_teleoperator_franka.unity_vr_reader as u;"
+        "print('OK' if a.__file__ and u.__file__ else 'BAD')"
+    )
+    assert r.stdout.strip() == "OK", (r.stdout, r.stderr)
