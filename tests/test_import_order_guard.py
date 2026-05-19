@@ -44,11 +44,25 @@ def test_run_record_hdf5_preimports_before_syspath_insert():
 
 
 def test_vr_modules_importable_from_teleop_package():
-    # §11.1: vr_align/unity_vr_reader 已入 lerobot_teleoperator_franka 包,
-    # 任意 cwd 经包路径可导入（无需 repo-根-on-sys.path）。
+    # §11.1 守门: vr_align/unity_vr_reader/unityvr_robot 三个子模块均经包路径
+    # 解析到 editable 真包内层目录的真文件——非 repo-根单层命名空间遮蔽副本。
+    # 判别签名: 真包是双层嵌套 .../lerobot_teleoperator_franka/lerobot_teleoperator_franka/
+    # (dir 名与其父目录名均为 lerobot_teleoperator_franka); repo-根遮蔽副本父目录是
+    # repo 根(名不为 lerobot_teleoperator_franka)。注: 顶层包对象在某些 cwd 下是
+    # 命名空间包(__file__=None, 合法), 故只断言子模块真文件, 不碰顶层 __file__。
     r = _probe(
+        "import pathlib;"
         "import lerobot_teleoperator_franka.vr_align as a;"
         "import lerobot_teleoperator_franka.unity_vr_reader as u;"
-        "print('OK' if a.__file__ and u.__file__ else 'BAD')"
+        "import lerobot_teleoperator_franka.unityvr_robot as m;"
+        "pa=pathlib.Path(a.__file__).resolve().parent;"
+        "pu=pathlib.Path(u.__file__).resolve().parent;"
+        "pm=pathlib.Path(m.__file__).resolve().parent;"
+        "ok=(pa==pu==pm)"
+        " and pa.name=='lerobot_teleoperator_franka'"
+        " and pa.parent.name=='lerobot_teleoperator_franka'"
+        " and m.vr_align.__name__=='lerobot_teleoperator_franka.vr_align'"
+        " and m.UnityVRReader.__module__=='lerobot_teleoperator_franka.unity_vr_reader';"
+        "print('OK' if ok else 'BAD a=%s u=%s m=%s'%(a.__file__,u.__file__,m.__file__))"
     )
     assert r.stdout.strip() == "OK", (r.stdout, r.stderr)
