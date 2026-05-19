@@ -6,7 +6,7 @@
 
 观测字段对齐说明（来自 franka.py get_observation 实读）：
   - joint 位置: joint_1.pos ... joint_7.pos (float，单独 key)
-  - joint 速度: get_observation 内已注释掉，写盘时补零
+  - joint 速度: joint_1.vel ... joint_7.vel (float，已接通 robot_get_joint_velocities)
   - ee pose:   ee_pose.x/y/z/rx/ry/rz (float，单独 key)
   - 夹爪状态:  gripper_state_norm ([0,1]), gripper_max_open 来自 cfg
   - 夹爪指令:  gripper_cmd_bin (get_action 返回)
@@ -131,8 +131,8 @@ def record_episode(robot, teleop, writer: HDF5EpisodeWriter,
         # 拼接 joint 位置数组（joint_1.pos ... joint_7.pos）
         joints = np.array([obs[f"joint_{i+1}.pos"] for i in range(7)], dtype=np.float64)
 
-        # joint_vel 在 get_observation 中已注释掉，补零
-        joint_vel = np.zeros(7, dtype=np.float64)
+        # joint_vel: 已接通 robot_get_joint_velocities; 缺失则零填(向后兼容)
+        joint_vel = extract_joint_vel(obs)
 
         # ee_pose 数组
         ee_pose = np.array(

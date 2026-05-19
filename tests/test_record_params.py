@@ -31,3 +31,17 @@ def test_resolve_fps_rejects_non_finite():
         rp.resolve_record_fps(None, float("nan"))
     with pytest.raises(ValueError):
         rp.resolve_record_fps(float("inf"), 30)
+
+
+def test_extract_joint_vel_from_obs():
+    import numpy as np
+    obs = {'joint_%d.vel' % (i+1): float(i) for i in range(7)}
+    obs.update({'joint_%d.pos' % (i+1): 0.0 for i in range(7)})
+    v = rp.extract_joint_vel(obs)
+    assert v.shape == (7,) and np.allclose(v, [0, 1, 2, 3, 4, 5, 6])
+
+
+def test_extract_joint_vel_missing_falls_back_zeros():
+    import numpy as np
+    v = rp.extract_joint_vel({'joint_1.pos': 0.0})
+    assert v.shape == (7,) and np.allclose(v, 0.0)

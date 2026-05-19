@@ -457,7 +457,7 @@ class Franka(Robot):
             # Read joint positions
             joint_position = self._robot.robot_get_joint_positions()
             # Read joint velocities
-            # joint_velocity = self._robot.robot_get_joint_velocities()
+            joint_velocity = self._robot.robot_get_joint_velocities()
             # Read end effector pose
             ee_pose = self._robot.robot_get_ee_pose()
         except Exception as e:
@@ -472,7 +472,7 @@ class Franka(Robot):
         obs_dict = {}
         for i in range(len(joint_position)):
             obs_dict[f"joint_{i+1}.pos"] = float(joint_position[i])
-            # obs_dict[f"joint_{i+1}.vel"] = float(joint_velocity[i])
+            obs_dict[f"joint_{i+1}.vel"] = float(joint_velocity[i])
 
         for i, axis in enumerate(["x", "y", "z", "rx", "ry", "rz"]):
             obs_dict[f"ee_pose.{axis}"] = float(ee_pose[i])
