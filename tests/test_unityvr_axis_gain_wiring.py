@@ -44,11 +44,27 @@ def _load_config_teleop():
             return decorator
 
     fake_tele_cfg.TeleoperatorConfig = _FakeTeleConfig
-    sys.modules.setdefault("lerobot", fake_lerobot)
-    sys.modules.setdefault("lerobot.teleoperators", fake_tele_pkg)
-    sys.modules.setdefault("lerobot.teleoperators.config", fake_tele_cfg)
-
-    return _load("_cfg_teleop", f"{_PKG}/config_teleop.py")
+    # 强制覆盖（不用 setdefault）：test_unity_vr_reader 等先加载真实包后，
+    # sys.modules 里已有真实 lerobot.teleoperators.config（其 register_subclass
+    # 写 draccus 全局注册表），setdefault 不会覆盖导致 draccus 重复注册报错。
+    # 调用后恢复原值保证测试隔离。
+    _saved = {
+        "lerobot": sys.modules.get("lerobot"),
+        "lerobot.teleoperators": sys.modules.get("lerobot.teleoperators"),
+        "lerobot.teleoperators.config": sys.modules.get("lerobot.teleoperators.config"),
+    }
+    sys.modules["lerobot"] = fake_lerobot
+    sys.modules["lerobot.teleoperators"] = fake_tele_pkg
+    sys.modules["lerobot.teleoperators.config"] = fake_tele_cfg
+    try:
+        mod = _load("_cfg_teleop", f"{_PKG}/config_teleop.py")
+    finally:
+        for k, v in _saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+    return mod
 
 
 def _make_fake_unityvr_robot_module(captured_calls):

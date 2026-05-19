@@ -81,6 +81,8 @@ class RecordConfig:
         # Time config
         self.episode_time_sec: int = time.get("episode_time_sec", 60)
         self.reset_time_sec: int = time.get("reset_time_sec", 10)
+        # 注意：yaml 实际键为 save_meta_period，此处 save_mera_period 为既有拼写 bug，
+        # Phase C 不修（修改会破坏 run_record.py 另一入口行为 = 违反向后兼容红线）
         self.save_mera_period: int = time.get("save_mera_period", 1)
         
         # Cameras config
@@ -91,6 +93,23 @@ class RecordConfig:
         
         # Storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
+
+        # Phase C 扩展字段（全 cfg.get 带默认，向后兼容；run_record.py 走
+        # record_cfg.yaml 缺新键时取默认，行为零变化）
+        self.out_dir = cfg.get("out_dir", None)
+        self.depth_enabled: bool = bool(cfg.get("depth", {}).get("enabled", False))
+        self.state_hifreq_enabled: bool = bool(
+            cfg.get("state_hifreq", {}).get("enabled", False))
+        self.state_hifreq_rate: int = int(
+            cfg.get("state_hifreq", {}).get("rate", 240))
+        # depth/state_hifreq 仅 RecordConfig 占位键，不写 hdf5/不进 schema，Phase D 才消费
+
+        # reset 配置：经 parse_reset_config 纯函数解析（单一真源在 record_params）
+        from core.record_params import parse_reset_config as _parse_reset
+        self.reset_between_episodes, self.reset_wait = _parse_reset(cfg)
+
+        # 颜色预检开关（缺省 True = 预检开启）
+        self.color_preflight: bool = bool(cfg.get("color_preflight", True))
     
     def _parse_teleop_config(self, teleop: Dict[str, Any]) -> None:
         """Parse teleoperation configuration based on control mode."""
@@ -142,6 +161,10 @@ class RecordConfig:
                 "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy")
             self.unityvr_robot_ip = uvr_cfg.get("robot_ip", "127.0.0.1")
             self.unityvr_robot_port = uvr_cfg.get("robot_port", 4242)
+            # §11.3 每轴增益（默认全1=等价历史 pose_scaler 两标量行为；§10.2(0) 红线:
+            # 增益仅在已验通映射输出后逐轴缩放，不改 _POS_MAP/R_cal 方向/手性）
+            self.pos_axis_gain = uvr_cfg.get("pos_axis_gain", [1.0, 1.0, 1.0])
+            self.rot_axis_gain = uvr_cfg.get("rot_axis_gain", [1.0, 1.0, 1.0])
 
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}")
@@ -209,6 +232,8 @@ class RecordConfig:
                 oc2base_path=self.oc2base_path,
                 robot_ip=self.unityvr_robot_ip,
                 robot_port=self.unityvr_robot_port,
+                pos_axis_gain=self.pos_axis_gain,
+                rot_axis_gain=self.rot_axis_gain,
             )
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}")

@@ -74,8 +74,12 @@ def test_reset_not_called_after_stop(tmp_path):
 # ── 以下为 parse_reset_config 纯函数单测（Phase B T5 review-fix） ──
 
 def _get_parse_fn():
-    """离线加载 run_record_hdf5 模块并取 parse_reset_config 函数（不触硬件）。"""
-    m = _load()
+    """从 record_params 取 parse_reset_config（单一真源，不触硬件）。"""
+    import importlib.util, os
+    p = os.path.join(_P, "scripts/core/record_params.py")
+    spec = importlib.util.spec_from_file_location("rp", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
     return m.parse_reset_config
 
 
