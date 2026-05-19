@@ -133,7 +133,7 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
         max_sec: 最长录制时间（秒）
         gripper_max_open: 夹爪最大开度（米），用于将 norm 转换为 gripper_m
         cam_names: 相机名列表，需与写盘时 cam_names 一致
-        stop_flag: 可选 callable()->bool，返回 True 时提前结束当前 ep
+        stop_flag: 可选 callable()->bool，返回 True 时提前结束当前 ep  # Task4 中途中断预留, 当前未接线
                    （Task 4 键盘接入；本 Task 默认 None=按 max_sec 结束）
 
     Returns:
@@ -221,10 +221,21 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
 
     "采集"与"落盘"解耦：
     - record_episode 只负责一条 ep 的采集并返回 list[frame]（cams 已编码）。
-    - deepcopy(buf) 在 buffer 复用（buf=None）前完成，保证后台线程拿到隔离快照。
+    - deepcopy(整个 payload) 在 buffer 复用（buf=None）前完成，frames+meta 全脱钩外部引用。
     - saver.submit(path, payload) 入队即返回，不等写盘（由 AsyncEpisodeSaver 后台完成）。
     - 丢弃 = 不 submit，不产文件。
     - 进程退出前由调用方（main 的 with AsyncEpisodeSaver）close() join 排空。
+
+    **stop 语义**：decide(ep) 在 record_episode 返回后调用；返回 'stop' = 停止且
+    **不提交当前刚录的 ep**（视为未显式 keep）。已 submit 的历史 ep 由
+    with AsyncEpisodeSaver 退出 close()/join 排空保证零丢失。最终键位→keep/discard/stop
+    的 UX 映射由 Task4 定义（Task4 可在需要时新增"保存当前再停"路径）。
+
+    **背压语义**：saver.submit 为 put_nowait O(1) 非阻塞；队列满抛 QueueFullError
+    （不静默丢，符合 spec §3.2 快速失败背压），不阻塞录制循环。
+
+    **reset 语义**：keep 与 discard 后（非末条、非 stop）均调用 reset_fn 回 home
+    （丢弃坏 ep 后仍需回 home 再重录）。
 
     Args:
         robot: Franka 实例
@@ -262,8 +273,8 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
         else:
             # keep：deepcopy 必须在 buf 复用/清空前，编码已在 record_episode 内完成
             path = f"{out_dir}/ep{ep:04d}_{int(time.time())}.h5"
-            payload = {
-                "frames": copy.deepcopy(buf),   # deepcopy 时序：在 buf=None 前
+            payload = copy.deepcopy({  # 整体 deepcopy：frames+meta 一次隔离，消除 oc2base_R/cam_names 别名风险
+                "frames": buf,
                 "meta": dict(
                     task_name=task_name,
                     target_fps=fps,
@@ -272,7 +283,7 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
                     vr_source=vr_source,
                     cam_names=cam_names,
                 ),
-            }
+            })  # deepcopy 时序：在 buf=None 前
             saver.submit(path, payload)
             log.info(f"[REC] episode {ep} 已入队写盘 → {path}")
             buf = None  # 释放本地引用；后台线程持有 deepcopy 快照
