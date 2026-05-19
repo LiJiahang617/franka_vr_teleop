@@ -30,9 +30,10 @@ def compute_delta_action(cur_T, prev_T, R_cal, pose_scaler, channel_signs, *,
         pos_axis_gain: (keyword-only) 位置每轴增益 [gx, gy, gz]，默认 (1,1,1)。
                仅在已验通映射方向输出后逐轴缩放，不改 _POS_MAP 方向/手性（§10.2(0)
                红线，关联 lesson kabsch-cannot-absorb-handedness）。默认全 1 时输出
-               逐字等价历史 pose_scaler 两标量行为。
+               逐字等价历史 pose_scaler 两标量行为。非 (3,) shape 或含 nan/inf 抛 ValueError。
         rot_axis_gain: (keyword-only) 旋转每轴增益 [grx, gry, grz]，默认 (1,1,1)。
                仅在 R_cal@d_rot_oc 换基输出后逐轴缩放，不改换基公式（§10.2(0)）。
+               非 (3,) shape 或含 nan/inf 抛 ValueError。
     Returns:
         np.ndarray (6,) = [dx,dy,dz,drx,dry,drz]（base 系）
     """
@@ -48,6 +49,16 @@ def compute_delta_action(cur_T, prev_T, R_cal, pose_scaler, channel_signs, *,
     ps, os_ = float(pose_scaler[0]), float(pose_scaler[1])
     pg = np.asarray(pos_axis_gain, float)  # §11.3 per-axis 位置增益（默认全1=历史行为）
     rg = np.asarray(rot_axis_gain, float)  # §11.3 per-axis 旋转增益（默认全1=历史行为）
+    # 增益来自 yaml 配置(§11.3)；shape 必须恰 (3,) 且有限——畸形/标量会静默广播成
+    # "配置写错伪装合法统一增益"、nan/inf 会喂真机产生异常运动，故 fail-loud。
+    if pg.shape != (3,):
+        raise ValueError(f"pos_axis_gain 必须 shape (3,) [gx,gy,gz]，实得 {pg.shape}")
+    if rg.shape != (3,):
+        raise ValueError(f"rot_axis_gain 必须 shape (3,) [grx,gry,grz]，实得 {rg.shape}")
+    if not np.all(np.isfinite(pg)):
+        raise ValueError(f"pos_axis_gain 含非有限值(nan/inf): {pos_axis_gain!r}")
+    if not np.all(np.isfinite(rg)):
+        raise ValueError(f"rot_axis_gain 含非有限值(nan/inf): {rot_axis_gain!r}")
     d[:3] = d[:3] * ps * pg * s[:3]
     d[3:] = d[3:] * os_ * rg * s[3:]
     return d

@@ -242,3 +242,68 @@ def test_axis_gain_keyword_only_does_not_break_5_positional_call():
                                        pos_axis_gain=(1., 1., 1.),
                                        rot_axis_gain=(1., 1., 1.))
     assert np.allclose(d, d_default, atol=1e-12)
+
+
+# ===== review-fix: §11.3 shape(3,)+finite 校验测试 (新增 2 个) =====
+
+def test_axis_gain_rejects_wrong_shape():
+    """pos/rot_axis_gain 非 (3,) shape 时必须 fail-loud 抛 ValueError。
+    涵盖: 标量、len1、len2、len4、shape(3,1) 各畸形。"""
+    R = np.eye(3)
+    prev = _T([0, 0, 0])
+    cur = _T([0.05, 0.0, 0.0])
+    ps = [1.0, 1.0]
+    signs = [1, 1, 1, 1, 1, 1]
+
+    # pos_axis_gain 畸形用例
+    bad_pos_cases = [
+        2.0,            # 标量 → shape ()
+        (2.0,),         # len1 → shape (1,)
+        [1., 1.],       # len2 → shape (2,)
+        [1., 1., 1., 1.],  # len4 → shape (4,)
+        [[1.], [1.], [1.]],  # shape (3,1)
+    ]
+    for bad in bad_pos_cases:
+        import pytest
+        with pytest.raises(ValueError, match="pos_axis_gain 必须 shape"):
+            m.compute_delta_action(cur, prev, R, ps, signs, pos_axis_gain=bad)
+
+    # rot_axis_gain 畸形用例
+    bad_rot_cases = [
+        2.0,
+        (2.0,),
+        [1., 1.],
+        [1., 1., 1., 1.],
+        [[1.], [1.], [1.]],
+    ]
+    for bad in bad_rot_cases:
+        import pytest
+        with pytest.raises(ValueError, match="rot_axis_gain 必须 shape"):
+            m.compute_delta_action(cur, prev, R, ps, signs, rot_axis_gain=bad)
+
+
+def test_axis_gain_rejects_non_finite():
+    """pos/rot_axis_gain 含 nan 或 inf 时必须 fail-loud 抛 ValueError。"""
+    R = np.eye(3)
+    prev = _T([0, 0, 0])
+    cur = _T([0.05, 0.0, 0.0])
+    ps = [1.0, 1.0]
+    signs = [1, 1, 1, 1, 1, 1]
+    import pytest
+
+    # pos_axis_gain 含 nan
+    with pytest.raises(ValueError, match="非有限"):
+        m.compute_delta_action(cur, prev, R, ps, signs,
+                               pos_axis_gain=[1., float("nan"), 1.])
+    # pos_axis_gain 含 inf
+    with pytest.raises(ValueError, match="非有限"):
+        m.compute_delta_action(cur, prev, R, ps, signs,
+                               pos_axis_gain=[1., float("inf"), 1.])
+    # rot_axis_gain 含 nan
+    with pytest.raises(ValueError, match="非有限"):
+        m.compute_delta_action(cur, prev, R, ps, signs,
+                               rot_axis_gain=[1., float("nan"), 1.])
+    # rot_axis_gain 含 inf
+    with pytest.raises(ValueError, match="非有限"):
+        m.compute_delta_action(cur, prev, R, ps, signs,
+                               rot_axis_gain=[1., float("inf"), 1.])
