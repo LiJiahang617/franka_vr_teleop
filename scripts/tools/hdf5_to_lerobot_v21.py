@@ -31,7 +31,7 @@ _REPO_SCRIPTS = Path(__file__).resolve().parents[1]
 if str(_REPO_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_REPO_SCRIPTS))
 
-from tools.hdf5_lerobot_map import OBS_STATE_KEYS, hdf5_frame_to_lerobot
+from tools.hdf5_lerobot_map import ACTION_KEYS, OBS_STATE_KEYS, hdf5_frame_to_lerobot
 
 # ──────────────────────────────────────────────────────────────────────────────
 # v21_meta：元数据构建纯函数
@@ -490,3 +490,186 @@ def episode_to_videos(
             out_paths[cam_name] = out_mp4
 
     return out_paths
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# convert：顶层转换逻辑（串联 meta / parquet / video）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def convert(
+    in_dir,
+    out,
+    fps: float = 30.0,
+    task: str = "task",
+    robot_type: str = "franka",
+    state_layout: str = "native",
+) -> None:
+    """将 in_dir 下所有 franka-hdf5-v1 episode 转换为 lerobot v2.1 数据集。
+
+    Args:
+        in_dir: 含 .h5 文件的目录（Path 或 str）
+        out: 输出根目录（Path 或 str）
+        fps: 帧率（用于 parquet timestamp 与 info.json）
+        task: 任务描述字符串（所有 episode 共用）
+        robot_type: 机器人类型（写入 info.json robot_type 字段）
+        state_layout: "native" 或 "realman"（仅影响 state 列序/命名，action 恒 7D 不变）
+
+    Raises:
+        ValueError: in_dir 中无 .h5 文件
+    """
+    import glob
+    import logging
+
+    in_dir = Path(in_dir)
+    out = Path(out)
+
+    # 排序保证 episode 顺序确定性
+    h5_files = sorted(glob.glob(str(in_dir / "*.h5")))
+    if not h5_files:
+        raise ValueError(f"no hdf5 in {in_dir}")
+
+    # ── 读首个 episode 获取相机名与图像尺寸 ──
+    with h5py.File(h5_files[0], "r") as h5:
+        cam_names = sorted(h5["observations/camera/rgb"].keys())
+        # 解码首帧获取 H×W（供 build_info_json cam_specs）
+        first_bytes = bytes(h5[f"observations/camera/rgb/{cam_names[0]}/images"][0])
+        frame0_bgr = cv2.imdecode(np.frombuffer(first_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if frame0_bgr is None:
+            raise ValueError(f"convert: 首 episode 首帧 jpeg 解码失败 ({h5_files[0]})")
+        H, W = frame0_bgr.shape[:2]
+
+    cam_specs = {cam: (H, W, 3) for cam in cam_names}
+
+    # ── state/action names（决定 info.json 中 features names 字段）──
+    if state_layout == "realman":
+        # 对标 realman info.json 命名规范
+        state_names = (
+            [f"joint_{i+1}_rad" for i in range(7)]
+            + ["gripper_open"]
+            + ["eef_pos_x", "eef_pos_y", "eef_pos_z"]
+            + ["eef_rot_euler_x", "eef_rot_euler_y", "eef_rot_euler_z"]
+        )
+    else:
+        # native：直接用 OBS_STATE_KEYS（human-readable 短名）
+        state_names = list(OBS_STATE_KEYS)
+
+    # action_names 恒由 ACTION_KEYS 衍生，与 state_layout 无关
+    action_names = list(ACTION_KEYS)
+
+    # ── 创建输出目录结构 ──
+    (out / "meta").mkdir(parents=True, exist_ok=True)
+    (out / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
+
+    # ── 逐 episode 转换 ──
+    episodes_rows = []   # [(ei, [task], N), ...]
+    stats_rows = []      # [{"episode_index": ei, "stats": {...}}, ...]
+    total_frames = 0
+    index_base = 0       # 全局帧索引累加器
+
+    for ei, h5_path in enumerate(h5_files):
+        out_parquet = out / "data" / "chunk-000" / f"episode_{ei:06d}.parquet"
+
+        # parquet 转换（stat_arrays 用于 compute_episode_stats）
+        try:
+            N, stat_arrays = episode_to_parquet(
+                h5_path=h5_path,
+                out_parquet=str(out_parquet),
+                episode_index=ei,
+                task_index=0,
+                fps=fps,
+                cam_names=cam_names,
+                task=task,
+                index_base=index_base,
+                state_layout=state_layout,
+            )
+        except Exception as e:
+            logging.warning(f"convert: 跳过 {h5_path}（parquet 失败）: {e}")
+            continue
+
+        # 视频导出
+        try:
+            episode_to_videos(
+                h5_path=h5_path,
+                out_dir=str(out),
+                episode_chunk=0,
+                episode_index=ei,
+                cam_names=cam_names,
+                fps=int(fps),
+            )
+        except Exception as e:
+            logging.warning(f"convert: 跳过 {h5_path}（video 失败）: {e}")
+            # parquet 已写，视频失败不回滚（保持与 parquet 产物一致性）
+
+        # 收集元数据
+        episodes_rows.append((ei, [task], N))
+        stats_rows.append({
+            "episode_index": ei,
+            "stats": compute_episode_stats(stat_arrays),
+        })
+        total_frames += N
+        index_base += N
+
+    total_episodes = len(episodes_rows)
+
+    # ── 写 meta 文件 ──
+    info = build_info_json(
+        robot_type=robot_type,
+        fps=fps,
+        total_episodes=total_episodes,
+        total_frames=total_frames,
+        total_tasks=1,
+        cam_specs=cam_specs,
+        action_names=action_names,
+        state_names=state_names,
+    )
+    tasks_rows = build_tasks_jsonl([task])
+    episodes_built = build_episodes_jsonl(episodes_rows)
+    write_meta_files(out, info, tasks_rows, episodes_built, stats_rows)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# main：CLI 入口
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    """CLI 入口：解析参数并调用 convert()。"""
+    import argparse
+    from core import paths
+
+    parser = argparse.ArgumentParser(
+        description="franka-hdf5-v1 → lerobot v2.1 转换器",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--in-dir",
+        default=paths.HDF5_EPISODES_DIR,
+        help="含 .h5 文件的目录（默认: core.paths.HDF5_EPISODES_DIR）",
+    )
+    parser.add_argument(
+        "--out",
+        default=paths.LEROBOT_OUT,
+        help="输出根目录（默认: core.paths.LEROBOT_OUT）",
+    )
+    parser.add_argument("--fps", type=float, default=30.0, help="帧率")
+    parser.add_argument("--task", default="task", help="任务描述字符串")
+    parser.add_argument("--robot-type", default="franka", help="机器人类型（写入 info.json）")
+    parser.add_argument(
+        "--state-layout",
+        choices=["native", "realman"],
+        default="native",
+        help="observation.state 列序/命名（native=OBS_STATE_KEYS 原序，realman=对标 realman 命名）",
+    )
+
+    args = parser.parse_args()
+    convert(
+        in_dir=args.in_dir,
+        out=args.out,
+        fps=args.fps,
+        task=args.task,
+        robot_type=args.robot_type,
+        state_layout=args.state_layout,
+    )
+
+
+if __name__ == "__main__":
+    main()
