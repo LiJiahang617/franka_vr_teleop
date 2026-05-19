@@ -7,6 +7,8 @@ record:
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
   user_notes:  # any additional notes about the dataset
   fps: 30 # 录制频率单一来源(相机/循环/写盘同源); CLI --fps 仅临时覆盖
+  reset_between_episodes: true  # episode 间自动调 robot.reset() 回 HOME_JOINT_POSITION+夹爪复位; false=关闭
+  reset_wait: 1.0               # reset 后等待机械臂稳定的时间（秒）; 仅 run_record_hdf5 读取
   control_mode: &control_mode "unityvr" # unityvr(世界系,头显独立) / isoteleop / spacemouse / oculus
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 

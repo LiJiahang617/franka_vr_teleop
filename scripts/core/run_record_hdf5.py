@@ -322,6 +322,13 @@ def main():
     fps = resolve_record_fps(a.fps, record_cfg.fps)
     log.info(f"[REC] 录制频率单一来源 fps={fps}（相机/循环/写盘同源）")
 
+    # 从 raw dict 读取 reset 配置（不改 RecordConfig 类，守 Phase C 范围）
+    # reset_between_episodes: 是否在 episode 间调用 robot.reset() 回 home；默认 True
+    # reset_wait: reset 后等待时间（秒），等待机械臂稳定；默认 1.0
+    _rec_raw = raw.get("record", {})
+    reset_between_episodes = bool(_rec_raw.get("reset_between_episodes", True))
+    reset_wait_sec = float(_rec_raw.get("reset_wait", 1.0))
+
     # 标定矩阵
     if a.oc2base_R and os.path.exists(a.oc2base_R):
         R = np.load(a.oc2base_R)
@@ -372,8 +379,8 @@ def main():
                 vr_source=record_cfg.control_mode,
                 episodes=a.episodes,
                 decide=decide,
-                reset_fn=None,   # Task 5 接入；此处不 reset
-                reset_wait=0.0,
+                reset_fn=robot.reset if reset_between_episodes else None,
+                reset_wait=reset_wait_sec,
                 stop_flag=dec.episode_stop_flag(),
             )
     finally:
