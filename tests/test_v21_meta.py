@@ -1,8 +1,15 @@
+import math
+
 import numpy as np
+import pytest
+
 from tools.hdf5_to_lerobot_v21 import (
-    build_info_json, build_tasks_jsonl, build_episodes_jsonl,
+    build_episodes_jsonl,
+    build_info_json,
+    build_tasks_jsonl,
     compute_episode_stats,
 )
+
 
 def test_info_json_schema():
     info = build_info_json(
@@ -45,13 +52,16 @@ def test_info_json_schema():
         assert f[mc]["shape"] == [1]
         assert f[mc]["names"] is None
 
+
 def test_tasks_jsonl():
     assert build_tasks_jsonl(["pick up the cube"]) == [{"task_index": 0, "task": "pick up the cube"}]
+
 
 def test_episodes_jsonl():
     rows = build_episodes_jsonl([(0, ["pick"], 5), (1, ["pick"], 7)])
     assert rows[0] == {"episode_index": 0, "tasks": ["pick"], "length": 5}
     assert rows[1]["length"] == 7
+
 
 def test_episode_stats_shape_and_values():
     state = np.array([[1., 2.], [3., 4.], [5., 6.]], np.float32)
@@ -60,4 +70,27 @@ def test_episode_stats_shape_and_values():
     assert s["max"] == [5.0, 6.0]
     assert s["mean"] == [3.0, 4.0]
     assert s["count"] == [3]
-    assert len(s["std"]) == 2 and all(x >= 0 for x in s["std"])
+    # pin ddof=0（总体标准差）：np.std([1,3,5], ddof=0) = sqrt(8/3) ≈ 1.6329931618554518
+    expected_std = math.sqrt(8.0 / 3.0)
+    assert len(s["std"]) == 2
+    assert all(x >= 0 for x in s["std"])
+    assert abs(s["std"][0] - expected_std) < 1e-9, f"std[0]={s['std'][0]} expected={expected_std}"
+    assert abs(s["std"][1] - expected_std) < 1e-9, f"std[1]={s['std'][1]} expected={expected_std}"
+
+
+def test_stats_1d_array_yields_list():
+    """1D 数组 reshape(-1,1) 后，min/max/mean/std 均为长度=1 的 list，count=[N]"""
+    ts = np.array([0.1, 0.2, 0.3], np.float32)
+    s = compute_episode_stats({"timestamp": ts})["timestamp"]
+    for key in ("min", "max", "mean", "std"):
+        val = s[key]
+        assert isinstance(val, list), f"{key} 应为 list，实际为 {type(val)}"
+        assert len(val) == 1, f"{key} 长度应为 1，实际为 {len(val)}"
+    assert s["count"] == [3]
+
+
+def test_stats_empty_raises():
+    """空数组应触发 ValueError"""
+    empty = np.zeros((0, 2))
+    with pytest.raises(ValueError, match="空数组"):
+        compute_episode_stats({"feat": empty})

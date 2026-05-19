@@ -14,6 +14,7 @@ CLI 用法：
 """
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -102,6 +103,7 @@ def build_info_json(
             "names": None,
         }
 
+    chunks_size = 1000
     return {
         "codebase_version": "v2.1",
         "robot_type": robot_type,
@@ -109,8 +111,8 @@ def build_info_json(
         "total_frames": total_frames,
         "total_tasks": total_tasks,
         "total_videos": total_episodes * len(cam_specs),
-        "total_chunks": 1,
-        "chunks_size": 1000,
+        "total_chunks": max(1, math.ceil(total_episodes / chunks_size)),
+        "chunks_size": chunks_size,
         "fps": fps,
         "splits": {"train": f"0:{total_episodes}"},
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
@@ -158,6 +160,10 @@ def compute_episode_stats(feature_arrays: dict) -> dict:
     stats = {}
     for key, arr in feature_arrays.items():
         arr = np.asarray(arr, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        if arr.shape[0] == 0:
+            raise ValueError(f"compute_episode_stats: feature {key!r} 空数组(0 帧)无法统计")
         stats[key] = {
             "min": arr.min(axis=0).tolist(),
             "max": arr.max(axis=0).tolist(),
@@ -168,7 +174,7 @@ def compute_episode_stats(feature_arrays: dict) -> dict:
     return stats
 
 
-def write_meta_files(out_dir: Path, info: dict, tasks: list, episodes: list, stats: list) -> None:
+def write_meta_files(out_dir: Path, info: dict, tasks: list, episodes: list, stats_rows: list) -> None:
     """将 4 个 meta 文件写入 out_dir/meta/。
 
     Args:
@@ -176,25 +182,27 @@ def write_meta_files(out_dir: Path, info: dict, tasks: list, episodes: list, sta
         info: info.json 字典
         tasks: tasks.jsonl 行列表（每行一个 dict）
         episodes: episodes.jsonl 行列表（每行一个 dict）
-        stats: episodes_stats.jsonl 行列表（每行一个 dict）
+        stats_rows: episodes_stats.jsonl 行列表，每行 {'episode_index': int, 'stats':
+            {feature: {min/max/mean/std/count}}}（由 convert 用 compute_episode_stats
+            结果包装，**勿直接传 compute_episode_stats 返回的 dict**）
     """
     meta_dir = Path(out_dir) / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     # info.json（indent=4）
-    (meta_dir / "info.json").write_text(json.dumps(info, indent=4), encoding="utf-8")
+    (meta_dir / "info.json").write_text(json.dumps(info, indent=4, allow_nan=False), encoding="utf-8")
 
     # tasks.jsonl（每行 json.dumps）
     (meta_dir / "tasks.jsonl").write_text(
-        "\n".join(json.dumps(row) for row in tasks) + "\n", encoding="utf-8"
+        "\n".join(json.dumps(row, allow_nan=False) for row in tasks) + "\n", encoding="utf-8"
     )
 
     # episodes.jsonl（每行 json.dumps）
     (meta_dir / "episodes.jsonl").write_text(
-        "\n".join(json.dumps(row) for row in episodes) + "\n", encoding="utf-8"
+        "\n".join(json.dumps(row, allow_nan=False) for row in episodes) + "\n", encoding="utf-8"
     )
 
     # episodes_stats.jsonl（每行 json.dumps）
     (meta_dir / "episodes_stats.jsonl").write_text(
-        "\n".join(json.dumps(row) for row in stats) + "\n", encoding="utf-8"
+        "\n".join(json.dumps(row, allow_nan=False) for row in stats_rows) + "\n", encoding="utf-8"
     )
