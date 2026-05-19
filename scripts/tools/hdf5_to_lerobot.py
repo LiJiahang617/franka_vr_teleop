@@ -25,10 +25,15 @@ sys.path.insert(0, _os.path.join(
     _os.environ.get('FRANKA_JHLI_ROOT', '/home/ubuntu/Desktop/jhli'),
     'lerobot_franka_teleop', 'scripts'))
 import importlib.util as _ilu
-_schema_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
-    _os.path.abspath(__file__)))), 'franka_hdf5_schema.py')
-_spec = _ilu.spec_from_file_location('franka_hdf5_schema', _schema_path)
-S = _ilu.module_from_spec(_spec); _spec.loader.exec_module(S)  # noqa: E402
+if 'franka_hdf5_schema' in sys.modules:
+    S = sys.modules['franka_hdf5_schema']  # 复用单一实例(还原旧 import 缓存语义)
+else:
+    _schema_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__)))), 'franka_hdf5_schema.py')
+    _spec = _ilu.spec_from_file_location('franka_hdf5_schema', _schema_path)
+    S = _ilu.module_from_spec(_spec)
+    sys.modules['franka_hdf5_schema'] = S  # exec 前注册(importlib 规范, 防重复实例)
+    _spec.loader.exec_module(S)  # noqa: E402
 from tools.hdf5_lerobot_map import build_feature_specs, hdf5_frame_to_lerobot
 
 log = logging.getLogger("h5->lerobot")
