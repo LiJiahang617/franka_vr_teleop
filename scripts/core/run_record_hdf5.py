@@ -13,6 +13,7 @@
   - 相机图像:  cam.read() 返回 numpy array，用 cv2.imencode 编码为 jpeg bytes
 """
 import argparse
+import copy
 import logging
 import os
 import sys
@@ -27,28 +28,36 @@ from pathlib import Path as _Path
 # 供 core.* / run_record 解析(结构固定, 用 __file__ 相对优于硬编码/env)。
 sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 
+# 纯逻辑依赖（无硬件）：可在模块顶层 import，测试加载安全
 from core import paths as _paths
-from core.hdf5_writer import HDF5EpisodeWriter
+from core.async_saver import AsyncEpisodeSaver
+from core.hdf5_writer import write_episode
 from core.record_params import resolve_record_fps, extract_joint_vel, realsense_fps
 
-# 复用既有 run_record 的 RecordConfig 和构造工具
-from run_record import RecordConfig
-
-from lerobot_robot_franka import FrankaConfig, Franka
-from lerobot.cameras.configs import ColorMode, Cv2Rotation
-from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
-from lerobot_teleoperator_franka import create_teleop
+# 硬件依赖（franka/lerobot 真实包）：延迟到函数内 import，避免测试加载时爆
+# RecordConfig → from run_record import RecordConfig  (在 build_robot_and_teleop/main 内)
+# FrankaConfig, Franka → from lerobot_robot_franka   (在 build_robot_and_teleop 内)
+# RealSenseCameraConfig → from lerobot.cameras.realsense  (在 build_robot_and_teleop 内)
+# create_teleop → from lerobot_teleoperator_franka    (在 build_robot_and_teleop 内)
 
 log = logging.getLogger("rec_hdf5")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-def build_robot_and_teleop(record_cfg: RecordConfig, fps: float):
+def build_robot_and_teleop(record_cfg, fps: float):
     """按既有 run_record.py 同款构造 robot 和 teleop。
+
+    硬件相关 import 在本函数内延迟执行，避免模块加载时依赖真实硬件包。
 
     Returns:
         (robot, teleop, gripper_max_open)
     """
+    # 延迟 import 硬件依赖
+    from lerobot_robot_franka import FrankaConfig, Franka
+    from lerobot.cameras.configs import ColorMode, Cv2Rotation
+    from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
+    from lerobot_teleoperator_franka import create_teleop
+
     # 相机配置（与 run_record.py 完全一致）
     wrist_image_cfg = RealSenseCameraConfig(
         serial_number_or_name=record_cfg.wrist_cam_serial,
@@ -109,23 +118,37 @@ def _encode_jpg(img: np.ndarray) -> np.ndarray:
     return np.frombuffer(buf.tobytes(), np.uint8)
 
 
-def record_episode(robot, teleop, writer: HDF5EpisodeWriter,
-                   fps: float, max_sec: float, gripper_max_open: float,
-                   cam_names: list):
-    """录制一个 episode，每 tick 收 action/obs 拼 frame 写入 writer。
+def record_episode(robot, teleop, fps: float, max_sec: float,
+                   gripper_max_open: float, cam_names: list,
+                   *, stop_flag=None) -> list:
+    """录制一个 episode，每 tick 收 action/obs 拼 frame 返回帧列表。
+
+    图像在 _encode_jpg 中编码（cvtColor(RGB2BGR)->imencode），
+    编码在 deepcopy 前完成（由 run_episodes 在 submit 前 deepcopy）。
 
     Args:
         robot: Franka 实例
         teleop: teleop 实例
-        writer: HDF5EpisodeWriter（已初始化，未 close）
         fps: 目标帧率
         max_sec: 最长录制时间（秒）
         gripper_max_open: 夹爪最大开度（米），用于将 norm 转换为 gripper_m
-        cam_names: 相机名列表，需与 writer cam_names 一致
+        cam_names: 相机名列表，需与写盘时 cam_names 一致
+        stop_flag: 可选 callable()->bool，返回 True 时提前结束当前 ep
+                   （Task 4 键盘接入；本 Task 默认 None=按 max_sec 结束）
+
+    Returns:
+        list[dict]：采集的帧列表，每帧含 ts/joints/joint_vel/ee_pose/
+                    gripper_m/gripper_norm/gripper_cmd/delta_ee_pose/cams；
+                    cams[cn] 已是 JPEG 编码后的 uint8 bytes。
     """
+    buf = []
     period = 1.0 / fps
     t_end = time.monotonic() + max_sec
     while time.monotonic() < t_end:
+        # 键盘提前结束钩子（Task 4 接入；stop_flag=None 时跳过判断）
+        if stop_flag is not None and stop_flag():
+            break
+
         t0 = time.monotonic()
 
         # 采集 teleop action
@@ -162,7 +185,7 @@ def record_episode(robot, teleop, writer: HDF5EpisodeWriter,
             dtype=np.float64,
         )
 
-        # 相机图像：cam.read() 返回 numpy array，用 cv2.imencode 编码
+        # 相机图像：编码为 jpeg bytes（编码在 deepcopy 前，满足 deepcopy 时序要求）
         cams = {}
         for cn in cam_names:
             img = obs.get(cn)
@@ -172,7 +195,7 @@ def record_episode(robot, teleop, writer: HDF5EpisodeWriter,
                 # 占位（相机未就绪时）
                 cams[cn] = np.zeros((4,), np.uint8)
 
-        writer.add(dict(
+        buf.append(dict(
             ts=time.monotonic(),
             joints=joints,
             joint_vel=joint_vel,
@@ -188,6 +211,78 @@ def record_episode(robot, teleop, writer: HDF5EpisodeWriter,
         if dt > 0:
             time.sleep(dt)
 
+    return buf
+
+
+def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
+                 cam_names, out_dir, task_name, oc2base_R, vr_source,
+                 episodes, decide, reset_fn=None, reset_wait=0.0):
+    """episode 循环编排：录完→deepcopy→submit→新 buffer（非阻塞）。
+
+    "采集"与"落盘"解耦：
+    - record_episode 只负责一条 ep 的采集并返回 list[frame]（cams 已编码）。
+    - deepcopy(buf) 在 buffer 复用（buf=None）前完成，保证后台线程拿到隔离快照。
+    - saver.submit(path, payload) 入队即返回，不等写盘（由 AsyncEpisodeSaver 后台完成）。
+    - 丢弃 = 不 submit，不产文件。
+    - 进程退出前由调用方（main 的 with AsyncEpisodeSaver）close() join 排空。
+
+    Args:
+        robot: Franka 实例
+        teleop: teleop 实例
+        saver: 实现 submit(path, payload) 的存盘器（AsyncEpisodeSaver 或 mock）
+        fps: 目标帧率
+        episode_sec: 每条 episode 最长时间（秒）
+        gripper_max_open: 夹爪最大开度（米）
+        cam_names: 相机名列表
+        out_dir: 输出目录
+        task_name: 任务名称
+        oc2base_R: 3x3 标定旋转矩阵（ndarray）
+        vr_source: VR 来源标识（字符串）
+        episodes: 录制 episode 总数
+        decide: Callable[[int], str]，返回 "keep"/"discard"/"stop"
+                （Task 4 由键盘 events 驱动；本 Task 测试注入 lambda）
+        reset_fn: 可选 Callable，episode 间调用回 home（Task 3 占位 hook；
+                  None=不 reset）
+        reset_wait: reset 后等待时间（秒）
+    """
+    for ep in range(episodes):
+        buf = record_episode(robot, teleop, fps, episode_sec, gripper_max_open,
+                             cam_names)
+
+        action = decide(ep)
+
+        if action == "stop":
+            # 停止：不 submit，不 reset，直接退出循环
+            log.info(f"[REC] episode {ep} 停止录制")
+            break
+        elif action == "discard":
+            # 丢弃：不 submit，不产文件
+            log.info(f"[REC] episode {ep} 丢弃（不写盘）")
+            buf = None
+        else:
+            # keep：deepcopy 必须在 buf 复用/清空前，编码已在 record_episode 内完成
+            path = f"{out_dir}/ep{ep:04d}_{int(time.time())}.h5"
+            payload = {
+                "frames": copy.deepcopy(buf),   # deepcopy 时序：在 buf=None 前
+                "meta": dict(
+                    task_name=task_name,
+                    target_fps=fps,
+                    oc2base_R=oc2base_R,
+                    quality={},
+                    vr_source=vr_source,
+                    cam_names=cam_names,
+                ),
+            }
+            saver.submit(path, payload)
+            log.info(f"[REC] episode {ep} 已入队写盘 → {path}")
+            buf = None  # 释放本地引用；后台线程持有 deepcopy 快照
+
+        # episode 间 reset（非末尾、非 stop 后）
+        if reset_fn is not None and ep < episodes - 1:
+            reset_fn()
+            if reset_wait > 0:
+                time.sleep(reset_wait)
+
 
 def main():
     ap = argparse.ArgumentParser(description="hdf5 录制入口（franka-hdf5-v1）")
@@ -202,6 +297,9 @@ def main():
     ap.add_argument("--oc2base-R", default=None,
                     help="oc2base_R .npy 路径（缺失则用单位矩阵）")
     a = ap.parse_args()
+
+    # 延迟 import 硬件依赖（RecordConfig 来自 run_record，需 lerobot 真实包）
+    from run_record import RecordConfig
 
     with open(a.config) as fh:
         raw = yaml.safe_load(fh)
@@ -223,23 +321,32 @@ def main():
     cam_names = list(robot.cameras.keys())
     log.info(f"[REC] 检测到相机: {cam_names}")
 
+    # sink：闭包调 write_episode（Task 2 抽出的模块级函数）
+    def sink(path, payload):
+        write_episode(path, payload["frames"], **payload["meta"])
+
+    # Task 4 键盘 decide 占位：按 episode_sec 计时结束，全部保存
+    def decide(ep):
+        return "keep"
+
     try:
-        for ep in range(a.episodes):
-            path = f"{a.out_dir}/ep{ep:04d}_{int(time.time())}.h5"
-            w = HDF5EpisodeWriter(
-                path=path,
-                task_name=a.task_name,
-                target_fps=fps,
-                oc2base_R=R,
-                quality={},
-                vr_source=record_cfg.control_mode,
+        # with 上下文保证进程退出前 close() join 排空（数据零丢）
+        with AsyncEpisodeSaver(sink=sink, maxsize=5) as saver:
+            run_episodes(
+                robot, teleop, saver,
+                fps=fps,
+                episode_sec=a.episode_sec,
+                gripper_max_open=gripper_max_open,
                 cam_names=cam_names,
+                out_dir=a.out_dir,
+                task_name=a.task_name,
+                oc2base_R=R,
+                vr_source=record_cfg.control_mode,
+                episodes=a.episodes,
+                decide=decide,
+                reset_fn=None,   # Task 5 接入；此处不 reset
+                reset_wait=0.0,
             )
-            log.info(f"[REC] episode {ep} → {path}，录制 {a.episode_sec}s")
-            record_episode(robot, teleop, w, fps, a.episode_sec,
-                           gripper_max_open, cam_names)
-            w.close()
-            log.info(f"[REC] episode {ep} 写盘+自检通过")
     finally:
         robot.disconnect()
         teleop.disconnect()
