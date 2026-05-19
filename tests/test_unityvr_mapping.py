@@ -128,3 +128,117 @@ def test_position_matches_verified_RIGHT_POSITION_MATRIX():
         out = m.compute_delta_action(cT, pT, Rid, [1.0, 1.0], [1, 1, 1, 1, 1, 1])[:3]
         assert np.allclose(out, Pv @ dp, atol=1e-9), (
             f"位置非验证参考极矢量映射: out={out} expect={Pv @ dp}")
+
+
+# ===== Task 1: §11.3 per-axis 增益层测试 (Step 1 新增) =====
+
+def test_pos_axis_gain_scales_each_position_axis_independently():
+    """§11.3: pos_axis_gain 逐轴缩放位置各分量，互不影响。
+    用先取无增益基线再乘的断言方式，避免硬编码 _POS_MAP 数值造成脆性。"""
+    R = np.eye(3)
+    prev = _T([0, 0, 0])
+    cur = _T([0.1, 0.2, 0.3])
+    signs = [1, 1, 1, 1, 1, 1]
+    ps = [1.0, 1.0]
+    # 先取无增益基线
+    base = m.compute_delta_action(cur, prev, R, pose_scaler=ps, channel_signs=signs)
+    # 施加逐轴增益
+    pg = [2.0, 5.0, 10.0]
+    gained = m.compute_delta_action(cur, prev, R, pose_scaler=ps, channel_signs=signs,
+                                    pos_axis_gain=pg)
+    # 位置各轴 = 基线逐轴 × pg
+    assert np.allclose(gained[:3], base[:3] * np.array(pg), atol=1e-12), (
+        f"位置增益不匹配: gained={gained[:3]} base={base[:3]} pg={pg}")
+    # 旋转项不应受 pos_axis_gain 影响
+    assert np.allclose(gained[3:], base[3:], atol=1e-12), (
+        f"pos_axis_gain 不应影响旋转: gained[3:]={gained[3:]} base[3:]={base[3:]}")
+
+
+def test_rot_axis_gain_scales_each_rotation_axis_independently():
+    """§11.3: rot_axis_gain 逐轴缩放旋转各分量，仅改目标轴，其余轴不变。"""
+    R = np.eye(3)
+    prev = _T([0, 0, 0])
+    # 仅绕 z 轴旋转 0.2 rad
+    cur = _T([0, 0, 0], Rotation.from_rotvec([0.0, 0.0, 0.2]).as_matrix())
+    signs = [1, 1, 1, 1, 1, 1]
+    ps = [1.0, 1.0]
+    # 无增益基线
+    base = m.compute_delta_action(cur, prev, R, pose_scaler=ps, channel_signs=signs)
+    # z 轴增益 = 3，其余 = 1
+    rg = [1.0, 1.0, 3.0]
+    gained = m.compute_delta_action(cur, prev, R, pose_scaler=ps, channel_signs=signs,
+                                    rot_axis_gain=rg)
+    # 旋转 z 分量应放大 3 倍
+    assert np.allclose(gained[3:], base[3:] * np.array(rg), atol=1e-12), (
+        f"旋转增益不匹配: gained[3:]={gained[3:]} base[3:]={base[3:]} rg={rg}")
+    # 位置项不应受 rot_axis_gain 影响
+    assert np.allclose(gained[:3], base[:3], atol=1e-12), (
+        f"rot_axis_gain 不应影响位置: gained[:3]={gained[:3]} base[:3]={base[:3]}")
+
+
+def test_axis_gain_default_equals_legacy_pose_scaler_behavior():
+    """§11.3 向后兼容: 不传 pos/rot_axis_gain == 显式传 (1,1,1)，数值逐字等价。"""
+    R = Rotation.from_euler("x", 30, degrees=True).as_matrix()
+    prev = _T([0.1, -0.2, 0.05])
+    cur = _T([0.15, -0.18, 0.07], Rotation.from_rotvec([0.05, -0.03, 0.1]).as_matrix())
+    ps = [2.5, 1.8]
+    signs = [1, -1, 1, -1, 1, 1]
+    # 不传增益（走默认）
+    d_legacy = m.compute_delta_action(cur, prev, R, pose_scaler=ps, channel_signs=signs)
+    # 显式传全 1 增益
+    d_explicit = m.compute_delta_action(cur, prev, R, pose_scaler=ps, channel_signs=signs,
+                                        pos_axis_gain=(1., 1., 1.),
+                                        rot_axis_gain=(1., 1., 1.))
+    assert np.allclose(d_legacy, d_explicit, atol=1e-12), (
+        f"默认增益应与显式 (1,1,1) 逐字等价: legacy={d_legacy} explicit={d_explicit}")
+
+
+def test_axis_gain_does_not_change_direction_or_handedness():
+    """§11.3 §10.2(0) 红线守门: 正增益下每非零分量的符号（方向/手性）与无增益基线一致，
+    且 gained[i] == base[i] * gain[i] 严格成立（增益是纯标量逐轴缩放，与方向正交）。
+    30 随机用例覆盖任意 R_cal、任意位置/旋转增量。"""
+    rng = np.random.default_rng(42)
+    for _ in range(30):
+        R_cal = Rotation.random(random_state=rng).as_matrix()
+        pos_delta = rng.normal(size=3) * 0.1
+        rot_delta = rng.normal(size=3) * 0.2
+        prev = _T([0, 0, 0])
+        cur = _T(pos_delta, Rotation.from_rotvec(rot_delta).as_matrix())
+        signs = [1, 1, 1, 1, 1, 1]
+        ps = [1.0, 1.0]
+        # 无增益基线
+        base = m.compute_delta_action(cur, prev, R_cal, pose_scaler=ps, channel_signs=signs)
+        # 随机正增益（避免零增益混淆符号判断）
+        pg = rng.uniform(0.5, 5.0, size=3)
+        rg = rng.uniform(0.5, 5.0, size=3)
+        gained = m.compute_delta_action(cur, prev, R_cal, pose_scaler=ps, channel_signs=signs,
+                                        pos_axis_gain=pg, rot_axis_gain=rg)
+        # 严格逐轴等式：gained == base * gain
+        assert np.allclose(gained[:3], base[:3] * pg, atol=1e-12), (
+            f"位置逐轴等式违反: gained={gained[:3]} base={base[:3]} pg={pg}")
+        assert np.allclose(gained[3:], base[3:] * rg, atol=1e-12), (
+            f"旋转逐轴等式违反: gained[3:]={gained[3:]} base[3:]={base[3:]} rg={rg}")
+        # 符号守门：非零分量符号不变
+        for i in range(3):
+            if abs(base[i]) > 1e-10:
+                assert np.sign(gained[i]) == np.sign(base[i]), (
+                    f"位置轴 {i} 方向翻转! base={base[i]:.6f} gained={gained[i]:.6f} pg={pg[i]:.3f}")
+        for i in range(3):
+            if abs(base[3 + i]) > 1e-10:
+                assert np.sign(gained[3 + i]) == np.sign(base[3 + i]), (
+                    f"旋转轴 {i} 方向翻转! base={base[3+i]:.6f} gained={gained[3+i]:.6f} rg={rg[i]:.3f}")
+
+
+def test_axis_gain_keyword_only_does_not_break_5_positional_call():
+    """§11.3 向后兼容: 5 位置参调用仍正常工作，新参 keyword-only 不破坏既有调用。"""
+    R = np.eye(3)
+    prev = _T([0, 0, 0])
+    cur = _T([0.05, -0.03, 0.1])
+    # 5 位置参（unityvr_robot.py 与既有 7 测试的调用方式）
+    d = m.compute_delta_action(cur, prev, R, [1.0, 1.0], [1, 1, 1, 1, 1, 1])
+    assert d.shape == (6,), f"5位置参调用应返回 shape (6,)，实际 {d.shape}"
+    # 结果与显式传默认增益一致
+    d_default = m.compute_delta_action(cur, prev, R, [1.0, 1.0], [1, 1, 1, 1, 1, 1],
+                                       pos_axis_gain=(1., 1., 1.),
+                                       rot_axis_gain=(1., 1., 1.))
+    assert np.allclose(d, d_default, atol=1e-12)

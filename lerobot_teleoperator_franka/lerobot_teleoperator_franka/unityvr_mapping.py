@@ -12,7 +12,8 @@ _POS_MAP = np.array([[0., 0., -1.],
                      [0., 1., 0.]], dtype=float)
 
 
-def compute_delta_action(cur_T, prev_T, R_cal, pose_scaler, channel_signs):
+def compute_delta_action(cur_T, prev_T, R_cal, pose_scaler, channel_signs, *,
+                         pos_axis_gain=(1., 1., 1.), rot_axis_gain=(1., 1., 1.)):
     """每 tick delta_ee_pose(6,)：oc 世界系位姿增量经已标定 R_cal 映射到 base。
 
     Args:
@@ -24,8 +25,14 @@ def compute_delta_action(cur_T, prev_T, R_cal, pose_scaler, channel_signs):
                位置走固定 _POS_MAP, 旋转走 R_cal@d_rot_oc。R_cal 现为固定坐标
                映射(非 SVD 标定), 配合面朝 base+X 长按 Meta 重置世界系。
         R_cal: 3x3 已标定 oc->base 旋转（vr_align）
-        pose_scaler: [pos_scale, ori_scale]
+        pose_scaler: [pos_scale, ori_scale] 全局标量增益
         channel_signs: 长 6 的 ±1
+        pos_axis_gain: (keyword-only) 位置每轴增益 [gx, gy, gz]，默认 (1,1,1)。
+               仅在已验通映射方向输出后逐轴缩放，不改 _POS_MAP 方向/手性（§10.2(0)
+               红线，关联 lesson kabsch-cannot-absorb-handedness）。默认全 1 时输出
+               逐字等价历史 pose_scaler 两标量行为。
+        rot_axis_gain: (keyword-only) 旋转每轴增益 [grx, gry, grz]，默认 (1,1,1)。
+               仅在 R_cal@d_rot_oc 换基输出后逐轴缩放，不改换基公式（§10.2(0)）。
     Returns:
         np.ndarray (6,) = [dx,dy,dz,drx,dry,drz]（base 系）
     """
@@ -39,8 +46,10 @@ def compute_delta_action(cur_T, prev_T, R_cal, pose_scaler, channel_signs):
     d[3:] = R_cal @ d_rot_oc  # 刚体换基: 控制器增量旋转(S-oc系)经真旋转 R_cal 忠实表达到 base (= rotvec(R_cal·ΔR_oc·R_calᵀ)); 旧式取负实为命令逆旋转(Bug2)
     s = np.asarray(channel_signs, float)
     ps, os_ = float(pose_scaler[0]), float(pose_scaler[1])
-    d[:3] = d[:3] * ps * s[:3]
-    d[3:] = d[3:] * os_ * s[3:]
+    pg = np.asarray(pos_axis_gain, float)  # §11.3 per-axis 位置增益（默认全1=历史行为）
+    rg = np.asarray(rot_axis_gain, float)  # §11.3 per-axis 旋转增益（默认全1=历史行为）
+    d[:3] = d[:3] * ps * pg * s[:3]
+    d[3:] = d[3:] * os_ * rg * s[3:]
     return d
 
 
