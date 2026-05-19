@@ -1,5 +1,6 @@
 import importlib.util, os, copy
 import numpy as np
+import pytest
 
 _P = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # 指向远端仓库（本文件 scp 到远端后 __file__ 变为远端路径，_P 自动正确）
@@ -68,3 +69,73 @@ def test_reset_not_called_after_stop(tmp_path):
                    episodes=5, decide=lambda i: next(seq),
                    reset_fn=r.reset, reset_wait=0.0)
     assert r.resets == 1          # ep0 keep 后 reset 1 次, ep1 stop 后不 reset
+
+
+# ── 以下为 parse_reset_config 纯函数单测（Phase B T5 review-fix） ──
+
+def _get_parse_fn():
+    """离线加载 run_record_hdf5 模块并取 parse_reset_config 函数（不触硬件）。"""
+    m = _load()
+    return m.parse_reset_config
+
+
+def test_parse_reset_bool_true_variants():
+    """缺省/True/字符串 true 变体 → rbe 均为 True。"""
+    prc = _get_parse_fn()
+    # 缺省（空 dict）→ True, 1.0
+    rbe, rw = prc({})
+    assert rbe is True
+    assert rw == 1.0
+    # 显式 bool True
+    rbe, _ = prc({"reset_between_episodes": True})
+    assert rbe is True
+    # 字符串 true 变体
+    for v in ("true", "True", "TRUE", "1", "yes", "on"):
+        rbe, _ = prc({"reset_between_episodes": v})
+        assert rbe is True, f"期望 True，got False，输入={v!r}"
+
+
+def test_parse_reset_bool_false_variants():
+    """False/字符串 false 变体 → rbe 均为 False（防 bool('false')==True 高危误判）。"""
+    prc = _get_parse_fn()
+    # 显式 bool False
+    rbe, _ = prc({"reset_between_episodes": False})
+    assert rbe is False
+    # 字符串 false 变体（核心修复验证）
+    for v in ("false", "False", "FALSE", "off", "0", "no"):
+        rbe, _ = prc({"reset_between_episodes": v})
+        assert rbe is False, f"期望 False，got True（bool(str) 误判！），输入={v!r}"
+
+
+def test_parse_reset_bool_invalid_raises():
+    """非法 reset_between_episodes 值 → 抛 ValueError 并含 reset_between_episodes 字样。"""
+    prc = _get_parse_fn()
+    for v in ("maybe", 123, []):
+        with pytest.raises(ValueError, match="reset_between_episodes"):
+            prc({"reset_between_episodes": v})
+
+
+def test_parse_reset_wait_valid():
+    """合法 reset_wait 值的解析验证。"""
+    prc = _get_parse_fn()
+    # 缺省 → 1.0
+    _, rw = prc({})
+    assert rw == 1.0
+    # 0 → 0.0
+    _, rw = prc({"reset_wait": 0})
+    assert rw == 0.0
+    # 2.5
+    _, rw = prc({"reset_wait": 2.5})
+    assert rw == 2.5
+    # None → 1.0（缺省语义）
+    _, rw = prc({"reset_wait": None})
+    assert rw == 1.0
+
+
+def test_parse_reset_wait_invalid_raises():
+    """非法 reset_wait → 抛 ValueError 并含 reset_wait 字样。"""
+    prc = _get_parse_fn()
+    import math
+    for v in (-1, math.nan, math.inf, "abc"):
+        with pytest.raises(ValueError, match="reset_wait"):
+            prc({"reset_wait": v})

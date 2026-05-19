@@ -44,6 +44,53 @@ log = logging.getLogger("rec_hdf5")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
+def parse_reset_config(rec_raw: dict):
+    """从 record yaml 的 raw dict 解析 reset 配置（纯函数, 可离线单测）。
+
+    Returns (reset_between_episodes: bool, reset_wait: float)。
+    严格解析: 防 yaml 引号字符串 "false" 被 bool() 误判为 True 而在用户
+    以为关闭时仍执行真机 robot.reset() 回 HOME（高危静默误动作）。
+
+    Raises ValueError: 非法 reset_between_episodes / reset_wait（非有限或<0）。
+    """
+    import math
+    v = rec_raw.get("reset_between_episodes", True)
+    if isinstance(v, bool):
+        rbe = v
+    elif v is None:
+        rbe = True
+    elif isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            rbe = True
+        elif s in ("false", "0", "no", "off"):
+            rbe = False
+        else:
+            raise ValueError(
+                f"record.reset_between_episodes 非法: {v!r}（应为 bool 或 "
+                "true/false/1/0/yes/no/on/off）"
+            )
+    else:
+        raise ValueError(
+            f"record.reset_between_episodes 必须为 bool, got {type(v).__name__}={v!r}"
+        )
+
+    w = rec_raw.get("reset_wait", 1.0)
+    if w is None:
+        rw = 1.0
+    else:
+        try:
+            rw = float(w)
+        except (TypeError, ValueError):
+            raise ValueError(f"record.reset_wait 非数字: {w!r}")
+        import math as _math
+        if not _math.isfinite(rw) or rw < 0:
+            raise ValueError(
+                f"record.reset_wait 必须为有限非负数, got {rw!r}"
+            )
+    return rbe, rw
+
+
 def build_robot_and_teleop(record_cfg, fps: float):
     """按既有 run_record.py 同款构造 robot 和 teleop。
 
@@ -325,9 +372,7 @@ def main():
     # 从 raw dict 读取 reset 配置（不改 RecordConfig 类，守 Phase C 范围）
     # reset_between_episodes: 是否在 episode 间调用 robot.reset() 回 home；默认 True
     # reset_wait: reset 后等待时间（秒），等待机械臂稳定；默认 1.0
-    _rec_raw = raw.get("record", {})
-    reset_between_episodes = bool(_rec_raw.get("reset_between_episodes", True))
-    reset_wait_sec = float(_rec_raw.get("reset_wait", 1.0))
+    reset_between_episodes, reset_wait_sec = parse_reset_config(raw.get("record", {}))
 
     # 标定矩阵
     if a.oc2base_R and os.path.exists(a.oc2base_R):
