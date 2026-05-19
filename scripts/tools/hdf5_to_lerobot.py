@@ -1,5 +1,12 @@
 """franka-hdf5-v1 episodes → 标准 LeRobotDataset。lerobot 怪问题隔离于此一处。
 
+⚠️ 版本注意(2026-05-19, 用户决策): 本脚本用 franka2 环境内 lerobot(v3.0), 产出
+   codebase_version=v3.0 数据集(meta=tasks.parquet/episodes/chunk/file.parquet/
+   stats.json; 文件名 file-NNN; videos/{key}/chunk/)。用户既有训练/可视化管线
+   (RoboCOIN visualize_dataset / realman 参考集 / GR00T modality.json)均为 v2.1,
+   与 v3.0 不互通(lerobot 对 codebase_version 强校验)。按用户决策本脚本保留产
+   v3.0 不改; 产 v2.1 由【独立 v2.1 转换器】负责(见 spec §11.5, 与 Codex 协作设计)。
+
 用法:
   envs/franka-teleop/bin/python lerobot_franka_teleop/scripts/tools/hdf5_to_lerobot.py \\
       --in _hdf5_episodes --repo-id local/franka_x --fps 30
