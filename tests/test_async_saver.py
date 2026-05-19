@@ -60,3 +60,29 @@ def test_context_manager_joins_on_exit():
     with asv.AsyncEpisodeSaver(sink=lambda p, d: saved.append(p), maxsize=5) as s:
         s.submit("/c", {})
     assert saved == ["/c"]            # __exit__ 已 join 排空
+
+
+# ── 新增 3 个 review-fix 测试 ──────────────────────────────────────────────
+
+def test_submit_after_close_raises():
+    """close() 后再 submit 必须抛 SaverClosedError，不得静默丢数据。"""
+    s = asv.AsyncEpisodeSaver(sink=lambda p, d: None, maxsize=5)
+    s.close()
+    with pytest.raises(asv.SaverClosedError):
+        s.submit("/after_close", {})
+
+
+def test_close_is_idempotent():
+    """连续两次 close() 不抛、不挂（第二次立即返回）。"""
+    s = asv.AsyncEpisodeSaver(sink=lambda p, d: None, maxsize=5)
+    s.close()
+    s.close()                         # 幂等，不应挂或抛
+
+
+def test_maxsize_must_be_positive():
+    """maxsize=0 或负数均须抛 ValueError（防无界队列破坏背压设计）。"""
+    sink = lambda p, d: None
+    with pytest.raises(ValueError):
+        asv.AsyncEpisodeSaver(sink=sink, maxsize=0)
+    with pytest.raises(ValueError):
+        asv.AsyncEpisodeSaver(sink=sink, maxsize=-1)

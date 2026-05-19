@@ -1,90 +1,99 @@
 """异步 episode 存盘器。
 
-将有界队列 + 后台单线程组合成生产级异步存盘组件：
-- submit(path, payload) 入队即返回（O(1)），不阻塞录制循环。
-- 队列满时抛 QueueFullError（不静默丢弃）。
-- 后台 _save_loop 串行调用注入的 sink(path, payload)。
-- close() / __exit__ join 排空队列，保证进程退出前所有 episode 落盘。
+有界队列 + 后台单线程：submit() 入队即返回不阻塞录制循环；队列满抛
+QueueFullError 不静默丢；后台 _save_loop 串行调 sink(path,payload)=写 hdf5
++validate_episode；close()/__exit__ join 排空保证进程退出前全落盘。
 
-注意：payload 必须是调用方已 deepcopy 的快照，本类不负责拷贝；
-deepcopy 时序由 run_record_hdf5.run_episodes 保证（在 buffer 复用前 deepcopy）。
-
-sink 由调用方注入，默认接 write_episode（见 hdf5_writer），也可注入 fake_sink 做离线单测。
+注意：payload 必须是调用方已 deepcopy 的快照，本类不拷贝（deepcopy 时序由
+run_record_hdf5.run_episodes 在 buffer 复用前保证）。
+close() 为**有意的无超时阻塞关闭**：必须等队列全部落盘才返回以保证零数据
+丢失（数据安全优先于活性）；若 sink 卡死 close() 会一直阻塞——属设计取舍，
+sink 卡死应由上层/运维另行检测，本类不引入超时以免提前退出丢数据。
 """
 
 import queue
 import threading
+from typing import Callable
 
 
 class QueueFullError(RuntimeError):
     """队列已满，submit 拒绝接受新 episode（不静默丢弃）。"""
 
 
+class SaverClosedError(RuntimeError):
+    """saver 已关闭后仍调用 submit（拒绝，防"提交成功但不落盘"静默丢数据）。"""
+
+
 class AsyncEpisodeSaver:
     """有界队列 + 后台单线程异步存盘器。
 
     Args:
-        sink: callable(path: str, payload: dict) -> None，由调用方注入。
-              在后台线程串行调用，含写 hdf5 + validate_episode。
-        maxsize: 队列最大深度（默认 5）。超出时 submit 抛 QueueFullError。
+        sink: Callable[[str, dict], None]，后台线程串行调用（写 hdf5+validate）。
+        maxsize: 队列最大深度（默认 5，必须 > 0；<=0 会使 Queue 无界，违背
+                 有界背压设计=潜在无界内存/静默积压，故拒绝）。
     """
 
-    def __init__(self, sink, maxsize: int = 5):
+    def __init__(self, sink: Callable[[str, dict], None], maxsize: int = 5):
+        if maxsize <= 0:
+            raise ValueError(
+                f"maxsize 必须 > 0（got {maxsize}）；<=0 会令 queue.Queue 无界，"
+                "违背有界队列背压设计"
+            )
         self._sink = sink
         self._q: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._lock = threading.Lock()      # 保护 _err / _closed 跨线程读写
         self._err: BaseException | None = None
-        # daemon=True：主线程退出时后台线程随之结束（close/join 保证正常排空）
+        self._closed = False
         self._thread = threading.Thread(target=self._save_loop, daemon=True)
         self._thread.start()
-
-    # ------------------------------------------------------------------
-    # 公共接口
-    # ------------------------------------------------------------------
 
     def submit(self, path: str, payload: dict) -> None:
         """入队一条 episode，不阻塞。
 
-        Args:
-            path: 目标 .h5 文件路径。
-            payload: 已 deepcopy 的帧快照字典（由调用方保证）。
-
         Raises:
-            QueueFullError: 队列已满时抛出，不静默丢弃。
-            后台已记录的异常（BaseException）: 透传给调用方。
+            SaverClosedError: 已 close() 后再 submit（防静默丢数据）。
+            QueueFullError: 队列已满（不静默丢弃）。
+            后台 sink 已记录的异常: 透传。
         """
-        # 先检查后台是否已报错，避免调用方无感知地持续入队
-        self._raise_if_failed()
+        with self._lock:
+            if self._closed:
+                raise SaverClosedError("AsyncEpisodeSaver 已关闭，拒绝新 submit")
+            if self._err is not None:
+                raise self._err
         try:
             self._q.put_nowait((path, payload))
         except queue.Full:
             raise QueueFullError(
                 f"AsyncEpisodeSaver 队列已满（maxsize={self._q.maxsize}），"
                 "请等待后台写盘完成或减少连录速度"
-            )
+            ) from None
 
     def close(self) -> None:
-        """放哨兵、等待后台线程排空后返回。
+        """放哨兵、等后台排空后返回。幂等（重复 close 安全）。
 
-        Raises:
-            后台 sink 抛出的首个异常（在此浮现）。
+        无超时阻塞（见模块 docstring）。Raises 后台 sink 首个异常。
         """
-        self._q.put(None)          # 哨兵通知 _save_loop 退出
-        self._thread.join()        # 等排空
-        self._raise_if_failed()    # 后台异常在此浮现
+        with self._lock:
+            if self._closed:
+                return                 # 幂等
+            self._closed = True
+        self._q.put(None)              # 哨兵（队列满则阻塞至腾空——保证排空语义）
+        self._thread.join()            # 等排空
+        self._raise_if_failed()        # 后台异常浮现
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-        return False               # 不吞调用方异常
-
-    # ------------------------------------------------------------------
-    # 后台线程
-    # ------------------------------------------------------------------
+        return False                   # 不吞调用方异常
 
     def _save_loop(self) -> None:
-        """后台线程主循环：串行 pop + sink。"""
+        """后台线程主循环：串行 pop + sink。
+
+        关闭依赖 thread.join()（非 queue.join()）；task_done() 保留仅为将来
+        可能引入 queue.join() 预留，当前不参与关闭逻辑。
+        """
         while True:
             item = self._q.get()
             try:
@@ -93,14 +102,17 @@ class AsyncEpisodeSaver:
                 path, payload = item
                 try:
                     self._sink(path, payload)
-                except BaseException as e:
-                    # 记录首个异常，继续排空避免死锁（close join 能正常返回）
-                    if self._err is None:
-                        self._err = e
+                except Exception as e:  # noqa: BLE001 — 仅 sink 业务异常(写/校验失败)
+                    # 记录首个异常，继续排空避免死锁（close join 能正常返回）；
+                    # 致命/退出类(BaseException 非 Exception)不在此吞，正常传播。
+                    with self._lock:
+                        if self._err is None:
+                            self._err = e
             finally:
                 self._q.task_done()
 
     def _raise_if_failed(self) -> None:
-        """若后台线程已捕获异常，在调用方线程重新抛出。"""
-        if self._err is not None:
-            raise self._err
+        with self._lock:
+            err = self._err
+        if err is not None:
+            raise err
