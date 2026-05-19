@@ -216,7 +216,8 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
 
 def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
                  cam_names, out_dir, task_name, oc2base_R, vr_source,
-                 episodes, decide, reset_fn=None, reset_wait=0.0):
+                 episodes, decide, reset_fn=None, reset_wait=0.0,
+                 stop_flag=None):
     """episode 循环编排：录完→deepcopy→submit→新 buffer（非阻塞）。
 
     "采集"与"落盘"解耦：
@@ -255,10 +256,13 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
         reset_fn: 可选 Callable，episode 间调用回 home（Task 3 占位 hook；
                   None=不 reset）
         reset_wait: reset 后等待时间（秒）
+        stop_flag: 可选 callable()->bool，传给 record_episode 提前结束当前 ep
+                   （Task 4 由 EpisodeDecider.episode_stop_flag() 提供；
+                   None=按 episode_sec 计时结束，headless 安全）
     """
     for ep in range(episodes):
         buf = record_episode(robot, teleop, fps, episode_sec, gripper_max_open,
-                             cam_names)
+                             cam_names, stop_flag=stop_flag)
 
         action = decide(ep)
 
@@ -336,9 +340,21 @@ def main():
     def sink(path, payload):
         write_episode(path, payload["frames"], **payload["meta"])
 
-    # Task 4 键盘 decide 占位：按 episode_sec 计时结束，全部保存
+    # 终端键盘监听（复用 run_record.py 既有模式）
+    # headless 时 listener=None、events 全 False → EpisodeDecider 安全降级为计时保存
+    from lerobot.utils.control_utils import init_keyboard_listener
+    from core.episode_keyboard import EpisodeDecider
+
+    listener, events = init_keyboard_listener()
+    dec = EpisodeDecider(events)
+    log.info("[REC] 键盘控制：→ 结束并保存当前 ep | ← 结束并丢弃 | Esc 停止录制")
+
+    # decide：读取当前 events 状态，keep/discard 后 reset 逐 ep 标志（stop 不 reset）
     def decide(ep):
-        return "keep"
+        action = dec.decide_after_episode()
+        if action in ("keep", "discard"):
+            dec.reset_episode_flags()
+        return action
 
     try:
         # with 上下文保证进程退出前 close() join 排空（数据零丢）
@@ -357,6 +373,7 @@ def main():
                 decide=decide,
                 reset_fn=None,   # Task 5 接入；此处不 reset
                 reset_wait=0.0,
+                stop_flag=dec.episode_stop_flag(),
             )
     finally:
         robot.disconnect()
