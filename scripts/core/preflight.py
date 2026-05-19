@@ -1,7 +1,8 @@
 """§11.2 数据预检门：夹爪健康/homing 预检 + 图像色彩通道序预检。
 
 设计原则：
-- 纯判据函数（`gripper_goto_span_ok`、`gripper_health_verdict`、`image_color_verdict`）
+- 纯判据函数（`gripper_goto_span_ok`、`gripper_health_verdict`、
+  `gripper_state_fields_ok`、`image_color_verdict`）
   只做逻辑运算，零 IO、零硬件依赖，可全离线单测。
 - 硬件薄壳（`run_gripper_preflight`、`run_color_preflight`、`default_proc_probe`、
   `default_log_probe`）封装所有 IO，由调用方注入 probe 回调实现可测可替换。
@@ -82,6 +83,36 @@ def gripper_health_verdict(state: dict, proc_alive: bool, connected: bool) -> Ve
     return Verdict(ok=True, reason="夹爪初始状态正常")
 
 
+def gripper_state_fields_ok(state: dict) -> Verdict:
+    """校验 gripper_get_state 返回 dict 的必需字段是否齐全且无 error_code。
+
+    纯函数，零 IO，可全离线单测。
+
+    Args:
+        state: `gripper_get_state()` 返回的 dict。
+
+    Returns:
+        Verdict(ok=False, reason=可行动说明) 若缺字段或 error_code!=0；
+        Verdict(ok=True, ...) 若字段齐全且 error_code==0。
+    """
+    required = ("error_code", "is_moving", "width")
+    missing = [k for k in required if k not in state]
+    if missing:
+        return Verdict(
+            ok=False,
+            reason=(
+                f"夹爪 get_state 缺字段 {missing}"
+                " → 夹爪客户端异常，重起 _run_gripper.sh"
+            ),
+        )
+    if state["error_code"] != 0:
+        return Verdict(
+            ok=False,
+            reason=f"夹爪 error_code={state['error_code']}，请检查夹爪状态或重起服务",
+        )
+    return Verdict(ok=True, reason="夹爪状态字段完整")
+
+
 def image_color_verdict(decoded_rgb_frames: list, rb_gap_thresh: float = 60.0) -> Verdict:
     """弱判据：检测解码帧是否整体存在 RGB/BGR 反转（宁漏勿误报正常画面）。
 
@@ -115,7 +146,7 @@ def image_color_verdict(decoded_rgb_frames: list, rb_gap_thresh: float = 60.0) -
 
 
 # ---------------------------------------------------------------------------
-# 硬件薄壳（IO 与判据分离；proc_probe/log_probe 由调用方注入，测试时注入 fake）
+# 硬件薄壳（IO 与判据分离；proc_probe/log_probe 由调用方注入，测试时注入 fake lambda 替换）
 # ---------------------------------------------------------------------------
 
 def run_gripper_preflight(
@@ -133,9 +164,11 @@ def run_gripper_preflight(
         client: zerorpc FrankaInterfaceClient（调用方已连接，本函数不新建连接）。
         proc_probe: `() -> bool`，True 表示 franka_hand_client 进程存活（注入 pgrep）。
         log_probe: `() -> bool`，True 表示日志出现 `Connected.`（注入读文件）。
-        targets: goto 目标 width 序列（默认 (0.0, 0.07, 0.04)，闭→开→中，覆盖行程）。
+        targets: goto 目标 width 序列（默认 (0.0, 0.07, 0.04)，闭→开→中，覆盖行程）；
+                 **必须 ≥ 2 个目标**才能计算跨度，否则视为配置错误立即拦截。
         settle_timeout: 每次 goto 后等待 is_moving→False 的最大秒数（默认 8s）。
-        poll: settle 轮询间隔（秒），测试时传 0.0 以跳过实际睡眠。
+        poll: settle 轮询间隔（秒）；poll<=0 仅测试用（跳过 sleep，仍受 settle_timeout 界）；
+              生产传 >0 避免忙等。
         min_span: 跨度阈值，见 `gripper_goto_span_ok`。
 
     Returns:
@@ -144,40 +177,91 @@ def run_gripper_preflight(
     §10.5(B) 正解：
     1. proc_alive = pgrep（**非** 端口 LISTEN）。
     2. connected = 日志 Connected.（等真日志再验，不在连接窗口过早验）。
-    3. gripper_initialize() + gripper_get_state() 初始健康门。
-    4. 对每个 target：goto → 轮询 is_moving→False/超时（给足行程时间，默认 8s）→ 记 width。
-    5. span = max-min > min_span（**禁** 0.5s+相邻差>0.01 假阴性）。
-    6. 不过 → 清晰可行动报错（重起夹爪/去 Desk Homing），开录前拦截。
+    3. proc/connected 两门通过后才发起任何 client RPC（保证预检错误不被 zerorpc 抛/卡绕过）。
+    4. gripper_initialize() + gripper_get_state() + 字段完整性校验。
+    5. 对每个 target：goto → 轮询 is_moving→False/超时（给足行程时间，默认 8s）→ 记 width。
+    6. span = max-min > min_span（**禁** 0.5s+相邻差>0.01 假阴性）。
+    7. 不过 → 清晰可行动报错（重起夹爪/去 Desk Homing），开录前拦截。
 
     zerorpc 单线程约定：所有 gripper_goto / gripper_get_state 串行顺序调用，
     本函数不并发（预检在录制循环开始前一次性完成）。
     """
-    # 步骤 1：进程 + 连接 + get_state 初始门
+    # 步骤 1：进程存活门（先于任何 client RPC）
     proc_alive = proc_probe()
+    if not proc_alive:
+        return Verdict(
+            ok=False,
+            reason=(
+                "夹爪子进程(franka_hand_client)未存活"
+                " → 重起 scripts/services/_run_gripper.sh"
+            ),
+        )
+
+    # 步骤 2：连接就绪门（先于任何 client RPC）
     connected = log_probe()
+    if not connected:
+        return Verdict(
+            ok=False,
+            reason=(
+                "夹爪 zerorpc 未就绪（日志无 Connected.）"
+                " → 等待 ~10s 或重起夹爪服务"
+            ),
+        )
+
+    # 步骤 3：targets 配置校验（≥2 才能算跨度）
+    if len(targets) < 2:
+        return Verdict(
+            ok=False,
+            reason=(
+                f"预检配置错误: targets 需≥2 个目标以测行程跨度, got {targets!r}"
+            ),
+        )
+
+    # 步骤 4：初始 get_state + 字段完整性 + error_code 门（此时 proc/connected 已通过）
     client.gripper_initialize()
     st = client.gripper_get_state()
-    v = gripper_health_verdict(st, proc_alive, connected)
+    v = gripper_state_fields_ok(st)
     if not v.ok:
         return v
 
-    # 步骤 2：多目标 goto → settle（轮询 is_moving→False/超时）→ 记 settled width
+    # 步骤 5：多目标 goto → settle（轮询 is_moving→False/超时）→ 记 settled width
     measured = []
     for target in targets:
+        # gripper_goto(width, speed, force, epsilon_inner, epsilon_outer, blocking)
+        # — zerorpc FrankaInterfaceClient 既有签名（与 Franka.reset 同款用法）
         client.gripper_goto(target, 0.05, 20.0, -1.0, -1.0, True)
         # settle：轮询直到 is_moving=False 或超时（给足行程时间，**非**固定 0.5s）
         t0 = time.monotonic()
         while True:
             s = client.gripper_get_state()
-            if not s.get("is_moving", False):
+            # 缺 is_moving 字段不静默当 False，立即返回可行动错误
+            if "is_moving" not in s:
+                return Verdict(
+                    ok=False,
+                    reason="夹爪 get_state 缺 is_moving → 客户端异常，重起 _run_gripper.sh",
+                )
+            if not s["is_moving"]:
                 break
             if time.monotonic() - t0 >= settle_timeout:
-                break
+                return Verdict(
+                    ok=False,
+                    reason=(
+                        f"夹爪 goto target={target} 超时 {settle_timeout}s 仍未稳定"
+                        "（is_moving 恒真）→ 检查夹爪/Desk Homing/重起夹爪客户端"
+                    ),
+                )
             if poll > 0:
                 time.sleep(poll)
-        measured.append(client.gripper_get_state()["width"])
+        # settle 完毕，取最终 width（校验字段存在）
+        s_final = client.gripper_get_state()
+        if "width" not in s_final:
+            return Verdict(
+                ok=False,
+                reason="夹爪 get_state 缺 width → 客户端异常，重起 _run_gripper.sh",
+            )
+        measured.append(s_final["width"])
 
-    # 步骤 3：span 判据（§10.5B 正解：整体跨度 > min_span，非相邻差）
+    # 步骤 6：span 判据（§10.5B 正解：整体跨度 > min_span，非相邻差）
     if not gripper_goto_span_ok(measured, min_span):
         return Verdict(
             ok=False,
@@ -226,6 +310,10 @@ def default_log_probe(log_path: str, marker: str = "Connected.") -> bool:
 
     §10.5(B)：LISTEN 后还需 ~6-7s 才出现 Connected.，必须等真日志再验，
     不在连接窗口内过早验证。
+
+    **陈旧日志风险**：依赖夹爪 (重)启动脚本（`scripts/services/_run_gripper.sh` /
+    debug `franka_start_gripper.sh` 已 `: > _gripper_live.log` 截断，§11.1-T4 验）
+    清空旧日志，否则上轮残留 Connected. 致假阳性。
     """
     try:
         with open(log_path) as f:
