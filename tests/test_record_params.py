@@ -35,8 +35,8 @@ def test_resolve_fps_rejects_non_finite():
 
 def test_extract_joint_vel_from_obs():
     import numpy as np
-    obs = {'joint_%d.vel' % (i+1): float(i) for i in range(7)}
-    obs.update({'joint_%d.pos' % (i+1): 0.0 for i in range(7)})
+    obs = {f"joint_{i + 1}.vel": float(i) for i in range(7)}
+    obs.update({f"joint_{i + 1}.pos": 0.0 for i in range(7)})
     v = rp.extract_joint_vel(obs)
     assert v.shape == (7,) and np.allclose(v, [0, 1, 2, 3, 4, 5, 6])
 
