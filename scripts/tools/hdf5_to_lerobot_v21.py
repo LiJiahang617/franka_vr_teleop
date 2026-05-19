@@ -206,3 +206,133 @@ def write_meta_files(out_dir: Path, info: dict, tasks: list, episodes: list, sta
     (meta_dir / "episodes_stats.jsonl").write_text(
         "\n".join(json.dumps(row, allow_nan=False) for row in stats_rows) + "\n", encoding="utf-8"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# v21_parquet：episode 帧写入（复用 hdf5_lerobot_map，无图像列）
+# ──────────────────────────────────────────────────────────────────────────────
+
+import h5py
+import pyarrow as pa
+import pyarrow.parquet as pq
+from tools.hdf5_lerobot_map import hdf5_frame_to_lerobot, OBS_STATE_KEYS
+
+# realman state 重排索引：native layout = [joint0..6(0-6), ee_pose(7-12), gripper_norm(13)]
+# realman layout  = [joint0..6(0-6), gripper_norm(13), ee_pose(7-12)]
+_REALMAN_STATE_IDX = list(range(7)) + [13] + list(range(7, 13))
+
+
+def episode_to_parquet(
+    h5_path: str,
+    out_parquet: str,
+    episode_index: int,
+    task_index: int,
+    fps: float,
+    cam_names: list,
+    task: str,
+    index_base: int,
+    state_layout: str = "native",
+) -> tuple:
+    """将 franka-hdf5-v1 episode 写为 lerobot v2.1 parquet。
+
+    复用 hdf5_lerobot_map.hdf5_frame_to_lerobot 取帧（图像丢弃，仅 state/action 入列）。
+    parquet 列（精确顺序）：
+      observation.state  fixed_size_list<float32>[14]
+      action             fixed_size_list<float32>[7]
+      timestamp          float32，row0=0.0，i/fps
+      frame_index        int64
+      episode_index      int64
+      index              int64（index_base + i 全局连续）
+      task_index         int64
+
+    Args:
+        h5_path: franka-hdf5-v1 文件路径
+        out_parquet: 输出 parquet 路径（父目录需已存在）
+        episode_index: episode 索引
+        task_index: task 索引
+        fps: 帧率，用于计算 timestamp
+        cam_names: 相机名列表（用于读帧，图像不入 parquet）
+        task: task 字符串（传给 hdf5_frame_to_lerobot）
+        index_base: 全局帧起始偏移（跨 episode 连续）
+        state_layout: "native"（默认）或 "realman"（仅重排 observation.state 列序）
+
+    Returns:
+        (N, stat_arrays)：N 为帧数；stat_arrays = {feature: np.ndarray (N, D)}，
+        供 compute_episode_stats 使用。observation.state (N,14), action (N,7),
+        其余元列均 (N,1)。
+    """
+    if state_layout not in ("native", "realman"):
+        raise ValueError(f"state_layout 必须为 'native' 或 'realman'，实际: {state_layout!r}")
+
+    with h5py.File(h5_path, "r") as h5:
+        N = int(h5["observations/arm/joints"].shape[0])
+
+        states = []
+        actions = []
+        timestamps = []
+        frame_indices = []
+        episode_indices = []
+        indices = []
+        task_indices = []
+
+        for i in range(N):
+            frame = hdf5_frame_to_lerobot(h5, i, cam_names=cam_names, task=task)
+
+            # state 重排（action 不经此分支，保持 7D 原样）
+            state = frame["observation.state"]  # np.float32 (14,)
+            if state_layout == "realman":
+                state = state[_REALMAN_STATE_IDX]
+
+            action = frame["action"]  # np.float32 (7,)
+
+            states.append(state.tolist())
+            actions.append(action.tolist())
+            timestamps.append(float(np.float32(i / fps)))
+            frame_indices.append(i)
+            episode_indices.append(episode_index)
+            indices.append(index_base + i)
+            task_indices.append(task_index)
+
+    # pyarrow fixed_size_list 类型
+    fsl14 = pa.list_(pa.float32(), 14)
+    fsl7 = pa.list_(pa.float32(), 7)
+
+    # 严格按列名顺序构建 schema（对标 realman parquet 实测）
+    schema = pa.schema([
+        pa.field("observation.state", fsl14),
+        pa.field("action", fsl7),
+        pa.field("timestamp", pa.float32()),
+        pa.field("frame_index", pa.int64()),
+        pa.field("episode_index", pa.int64()),
+        pa.field("index", pa.int64()),
+        pa.field("task_index", pa.int64()),
+    ])
+
+    table = pa.table(
+        {
+            "observation.state": pa.array(states, type=fsl14),
+            "action": pa.array(actions, type=fsl7),
+            "timestamp": pa.array(timestamps, type=pa.float32()),
+            "frame_index": pa.array(frame_indices, type=pa.int64()),
+            "episode_index": pa.array(episode_indices, type=pa.int64()),
+            "index": pa.array(indices, type=pa.int64()),
+            "task_index": pa.array(task_indices, type=pa.int64()),
+        },
+        schema=schema,
+    )
+
+    pq.write_table(table, out_parquet)
+
+    # 构建 stat_arrays（2D，供 compute_episode_stats）
+    states_np = np.array(states, dtype=np.float32)    # (N, 14)
+    actions_np = np.array(actions, dtype=np.float32)  # (N, 7)
+    stat_arrays = {
+        "observation.state": states_np,
+        "action": actions_np,
+        "timestamp": np.array(timestamps, dtype=np.float32).reshape(N, 1),
+        "frame_index": np.array(frame_indices, dtype=np.int64).reshape(N, 1),
+        "episode_index": np.array(episode_indices, dtype=np.int64).reshape(N, 1),
+        "index": np.array(indices, dtype=np.int64).reshape(N, 1),
+        "task_index": np.array(task_indices, dtype=np.int64).reshape(N, 1),
+    }
+    return N, stat_arrays
