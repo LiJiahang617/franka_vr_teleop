@@ -392,6 +392,62 @@ def main():
     def sink(path, payload):
         write_episode(path, payload["frames"], **payload["meta"])
 
+    # §11.2 预检门：robot.connect 后、录制前运行，任一不过 → sys.exit(2)（开录前 ~10s 拦截）
+    # 目的：把"中途静默失败"变"启动期可行动报错"，避免录完才发现夹爪/色彩异常
+    from core import preflight as pf
+
+    # 1. 夹爪预检（仅当 use_gripper=True；zerorpc client 由 robot._robot 获取，预检在循环外一次性完成）
+    if getattr(record_cfg, "use_gripper", True):
+        log.info("[PREFLIGHT] 运行夹爪预检（进程存活/连接就绪/width 真变）…")
+        gripper_verdict = pf.run_gripper_preflight(
+            client=robot._robot,
+            proc_probe=pf.default_proc_probe,
+            log_probe=lambda: pf.default_log_probe(
+                "/home/ubuntu/Desktop/jhli/_gripper_live.log"
+            ),
+        )
+        if not gripper_verdict.ok:
+            log.error(f"[PREFLIGHT] 夹爪预检失败: {gripper_verdict.reason}")
+            robot.disconnect()
+            teleop.disconnect()
+            sys.exit(2)
+
+    # 2. 色彩预检（默认开启；raw dict 可设 color_preflight: false 关闭）
+    color_preflight_enabled = raw.get("record", {}).get("color_preflight", True)
+    if color_preflight_enabled:
+        log.info("[PREFLIGHT] 采首帧运行色彩通道序预检…")
+        try:
+            _obs_pf = robot.get_observation()
+            _encoded_pf = []
+            for _cn in cam_names:
+                _img = _obs_pf.get(_cn)
+                if _img is not None and isinstance(_img, np.ndarray):
+                    _encoded_pf.append(_encode_jpg(_img))
+            if _encoded_pf:
+                # _decode 约定：cv2.imdecode(IMREAD_COLOR)(BGR)→cvtColor(BGR2RGB)(RGB)
+                import importlib.util as _ilu
+                _hm_spec = _ilu.spec_from_file_location(
+                    "hdf5_lerobot_map",
+                    str(_Path(__file__).resolve().parents[1] / "tools/hdf5_lerobot_map.py"),
+                )
+                _hm = _ilu.module_from_spec(_hm_spec)
+                _hm_spec.loader.exec_module(_hm)
+                _color_verdict = pf.run_color_preflight(
+                    decode_fn=_hm._decode,
+                    encoded_frames=_encoded_pf,
+                )
+                if not _color_verdict.ok:
+                    log.error(f"[PREFLIGHT] 色彩预检失败: {_color_verdict.reason}")
+                    robot.disconnect()
+                    teleop.disconnect()
+                    sys.exit(2)
+            else:
+                log.warning("[PREFLIGHT] 色彩预检跳过（无可用相机帧）")
+        except Exception as _e:
+            log.warning(f"[PREFLIGHT] 色彩预检异常（弱判据，继续录制）: {_e}")
+
+    log.info("[PREFLIGHT] 夹爪/色彩预检通过，开始录制")
+
     # 终端键盘监听（复用 run_record.py 既有模式）
     # headless 时 listener=None、events 全 False → EpisodeDecider 安全降级为计时保存
     from lerobot.utils.control_utils import init_keyboard_listener
