@@ -15,9 +15,11 @@ CLI 用法：
 
 import json
 import math
+import subprocess
 import sys
 from pathlib import Path
 
+import cv2
 import h5py
 import numpy as np
 import pyarrow as pa
@@ -345,3 +347,93 @@ def episode_to_parquet(
         "task_index": np.array(task_indices, dtype=np.int64).reshape(N, 1),
     }
     return N, stat_arrays
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# v21_video：episode 视频导出（ffmpeg libx264 yuv420p，同 realman 实测参数）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def episode_to_videos(
+    h5_path: str,
+    out_dir: str,
+    episode_chunk: int,
+    episode_index: int,
+    cam_names: list,
+    fps: int,
+) -> dict:
+    """将 franka-hdf5-v1 episode 各相机图像编码为 h264 mp4 文件。
+
+    与 map._decode 通道约定一致：jpeg bytes → BGR(cv2.imdecode) → RGB(cvtColor)
+    以 rgb24 喂 ffmpeg，产 yuv420p h264（同 realman 实测参数）。
+    规避 SVT-AV1 <32px 崩溃：始终用 libx264。
+
+    Args:
+        h5_path: franka-hdf5-v1 文件路径
+        out_dir: 输出根目录
+        episode_chunk: chunk 索引（用于路径模板）
+        episode_index: episode 索引（用于路径模板）
+        cam_names: 相机名列表，对应 hdf5 中 observations/camera/rgb/{cam}/images
+        fps: 帧率
+
+    Returns:
+        {cam_name: Path} — 每相机 mp4 输出路径 dict
+    """
+    out_paths = {}
+
+    with h5py.File(h5_path, "r") as h5:
+        for cam_name in cam_names:
+            ds = h5[f"observations/camera/rgb/{cam_name}/images"]
+            n_frames = ds.shape[0]
+            if n_frames == 0:
+                raise ValueError(f"episode_to_videos: {cam_name} 0 帧，无法编码")
+
+            # 第 0 帧确定 H, W
+            frame0_bytes = bytes(ds[0])
+            frame0_bgr = cv2.imdecode(np.frombuffer(frame0_bytes, np.uint8), cv2.IMREAD_COLOR)
+            H, W = frame0_bgr.shape[:2]
+
+            # 准备输出目录和文件路径
+            vid_dir = (
+                Path(out_dir)
+                / "videos"
+                / f"chunk-{episode_chunk:03d}"
+                / f"observation.images.{cam_name}"
+            )
+            vid_dir.mkdir(parents=True, exist_ok=True)
+            out_mp4 = vid_dir / f"episode_{episode_index:06d}.mp4"
+
+            # 收集所有帧的 RGB bytes（逐帧 jpeg → BGR → RGB）
+            raw_frames = bytearray()
+            # 第 0 帧已解码，直接转 RGB 复用
+            frame0_rgb = cv2.cvtColor(frame0_bgr, cv2.COLOR_BGR2RGB)
+            raw_frames.extend(frame0_rgb.tobytes())
+
+            for i in range(1, n_frames):
+                buf = bytes(ds[i])
+                bgr = cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR)
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                raw_frames.extend(rgb.tobytes())
+
+            # ffmpeg 编码：stdin 喂 rgb24 raw，输出 libx264 yuv420p mp4
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo",
+                "-pix_fmt", "rgb24",
+                "-s", f"{W}x{H}",
+                "-r", str(fps),
+                "-i", "-",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-r", str(fps),
+                "-an",
+                str(out_mp4),
+            ]
+            result = subprocess.run(cmd, input=bytes(raw_frames), capture_output=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"ffmpeg 编码失败（{cam_name}）: {result.stderr.decode(errors='replace')[-2000:]}"
+                )
+
+            out_paths[cam_name] = out_mp4
+
+    return out_paths
