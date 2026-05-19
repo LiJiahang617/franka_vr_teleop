@@ -387,3 +387,64 @@ def test_episode_to_parquet_returns_stat_arrays(tmp_path):
     for col in ("timestamp", "frame_index", "episode_index", "index", "task_index"):
         arr = stat_arrays[col]
         assert arr.shape == (N, 1), f"{col} shape 应为 ({N},1)，实际: {arr.shape}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 测试 #7: 反-copy 委托测试——证明 episode_to_parquet 使用 hdf5_frame_to_lerobot mapper
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_episode_to_parquet_delegates_to_mapper(tmp_path, monkeypatch):
+    """证明 episode_to_parquet 的 state/action 数据来自 hdf5_frame_to_lerobot（而非内部 copy 逻辑）。
+
+    用 monkeypatch 将 tools.hdf5_to_lerobot_v21 命名空间的 hdf5_frame_to_lerobot
+    替换为返回哨兵值的 fake，断言 parquet 列全等于哨兵值。
+    """
+    N = 4
+    h5p = str(tmp_path / "ep.h5")
+    outp = str(tmp_path / "ep.parquet")
+    _mk_h5(h5p, N=N, cams=("wrist",))
+
+    # 哨兵值：state 全为 7.0，action 全为 3.0
+    SENTINEL_STATE = np.full(14, 7.0, dtype=np.float32)
+    SENTINEL_ACTION = np.full(7, 3.0, dtype=np.float32)
+
+    def fake_hdf5_frame_to_lerobot(h5, frame_idx, cam_names, task):
+        """返回哨兵值的 fake mapper，证明数据来自 mapper 调用而非内部逻辑。"""
+        result = {
+            "observation.state": SENTINEL_STATE.copy(),
+            "action": SENTINEL_ACTION.copy(),
+        }
+        # 添加图像占位（episode_to_parquet 会忽略图像列，但 frame 结构需完整）
+        for cam in cam_names:
+            result[f"observation.images.{cam}"] = np.zeros((8, 8, 3), dtype=np.uint8)
+        return result
+
+    # monkeypatch 目标是 hdf5_to_lerobot_v21 模块命名空间里的引用
+    monkeypatch.setattr("tools.hdf5_to_lerobot_v21.hdf5_frame_to_lerobot", fake_hdf5_frame_to_lerobot)
+
+    episode_to_parquet(
+        h5_path=h5p, out_parquet=outp,
+        episode_index=0, task_index=0,
+        fps=30, cam_names=["wrist"],
+        task="pick", index_base=0,
+        state_layout="native",
+    )
+
+    tbl = pq.read_table(outp)
+    assert tbl.num_rows == N, f"行数应为 {N}，实际: {tbl.num_rows}"
+
+    # 断言所有行的 state/action 均等于哨兵值（证明数据来自 fake mapper）
+    for i in range(N):
+        state_row = tbl["observation.state"][i].as_py()
+        action_row = tbl["action"][i].as_py()
+
+        assert len(state_row) == 14, f"行{i} state 长度应为 14，实际: {len(state_row)}"
+        assert len(action_row) == 7, f"行{i} action 长度应为 7，实际: {len(action_row)}"
+
+        for k in range(14):
+            assert abs(state_row[k] - 7.0) < 1e-6, \
+                f"行{i} state[{k}] 应为哨兵 7.0，实际: {state_row[k]}（数据未来自 mapper）"
+
+        for k in range(7):
+            assert abs(action_row[k] - 3.0) < 1e-6, \
+                f"行{i} action[{k}] 应为哨兵 3.0，实际: {action_row[k]}（数据未来自 mapper）"

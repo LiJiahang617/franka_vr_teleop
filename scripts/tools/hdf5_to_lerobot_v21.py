@@ -18,12 +18,17 @@ import math
 import sys
 from pathlib import Path
 
+import h5py
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # 自举：确保 <repo>/scripts 在 sys.path 中（同 v3.0 模式）
 _REPO_SCRIPTS = Path(__file__).resolve().parents[1]
 if str(_REPO_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_REPO_SCRIPTS))
+
+from tools.hdf5_lerobot_map import OBS_STATE_KEYS, hdf5_frame_to_lerobot
 
 # ──────────────────────────────────────────────────────────────────────────────
 # v21_meta：元数据构建纯函数
@@ -212,14 +217,16 @@ def write_meta_files(out_dir: Path, info: dict, tasks: list, episodes: list, sta
 # v21_parquet：episode 帧写入（复用 hdf5_lerobot_map，无图像列）
 # ──────────────────────────────────────────────────────────────────────────────
 
-import h5py
-import pyarrow as pa
-import pyarrow.parquet as pq
-from tools.hdf5_lerobot_map import hdf5_frame_to_lerobot, OBS_STATE_KEYS
-
-# realman state 重排索引：native layout = [joint0..6(0-6), ee_pose(7-12), gripper_norm(13)]
-# realman layout  = [joint0..6(0-6), gripper_norm(13), ee_pose(7-12)]
-_REALMAN_STATE_IDX = list(range(7)) + [13] + list(range(7, 13))
+# realman state 重排索引（由 OBS_STATE_KEYS 推导，防止 key 序漂移）
+# native layout: joints(0-6), ee_pose(7-12), gripper_norm(13)
+# realman layout: joints(0-6), gripper_norm(13→7), ee_pose(7-12→8-13)
+_REALMAN_STATE_ORDER = (
+    [f"joint_{i+1}.pos" for i in range(7)]
+    + ["gripper_norm"]
+    + [f"ee_pose.{a}" for a in ("x", "y", "z", "rx", "ry", "rz")]
+)
+_REALMAN_STATE_IDX = [OBS_STATE_KEYS.index(k) for k in _REALMAN_STATE_ORDER]
+assert sorted(_REALMAN_STATE_IDX) == list(range(14)), "置换不合法，OBS_STATE_KEYS 结构已变动"  # 自检
 
 
 def episode_to_parquet(
@@ -266,6 +273,8 @@ def episode_to_parquet(
 
     with h5py.File(h5_path, "r") as h5:
         N = int(h5["observations/arm/joints"].shape[0])
+        if N == 0:
+            raise ValueError(f"episode_to_parquet: {h5_path} 0 帧，无法转换")
 
         states = []
         actions = []
@@ -287,7 +296,7 @@ def episode_to_parquet(
 
             states.append(state.tolist())
             actions.append(action.tolist())
-            timestamps.append(float(np.float32(i / fps)))
+            timestamps.append(np.float32(i / fps).item())  # 故意 float32 对齐 realman timestamp dtype
             frame_indices.append(i)
             episode_indices.append(episode_index)
             indices.append(index_base + i)
