@@ -159,7 +159,7 @@ class TestEpisodeToVideosSmall:
             assert int(info["height"]) == H, f"{cam_name}: height={info['height']} expect {H}"
 
     def test_ffprobe_frame_count(self, h5_and_outdir):
-        """视频帧数 == hdf5N=3。"""
+        """视频帧数 == hdf5 N=3。"""
         h5_path, out_dir = h5_and_outdir
         episode_to_videos(
             h5_path=str(h5_path),
@@ -233,3 +233,115 @@ class TestEpisodeToVideosFull:
             assert info["r_frame_rate"] == "30/1"
             assert int(info["width"]) == W
             assert int(info["height"]) == H
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 新增测试（Codex review-fix：坏 jpeg / 帧尺寸不一致 / 失败无残留）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_bad_jpeg_hdf5(h5_path: Path, cam_name: str, n_frames: int, bad_frame_idx: int) -> None:
+    """生成含坏 jpeg 的合成 hdf5（bad_frame_idx 帧为非法 bytes）。"""
+    H, W = 16, 16
+    vlen_u8 = h5py.vlen_dtype(np.uint8)
+    with h5py.File(h5_path, "w") as h5:
+        h5.create_dataset("observations/arm/joints", data=np.zeros((n_frames, 7), dtype=np.float32))
+        h5.create_dataset("observations/arm/gripper", data=np.zeros((n_frames, 1), dtype=np.float32))
+        h5.create_dataset("observations/arm/ee_pose", data=np.zeros((n_frames, 6), dtype=np.float32))
+        h5.create_dataset("action", data=np.zeros((n_frames, 7), dtype=np.float32))
+        ds = h5.create_dataset(
+            f"observations/camera/rgb/{cam_name}/images",
+            shape=(n_frames,),
+            dtype=vlen_u8,
+        )
+        for i in range(n_frames):
+            if i == bad_frame_idx:
+                # 非法 bytes，cv2.imdecode 会返回 None
+                ds[i] = np.frombuffer(b"\xff\xd8\xff\x00invalid_not_jpeg", dtype=np.uint8)
+            else:
+                bgr = np.full((H, W, 3), [100, 128, 200], dtype=np.uint8)
+                ds[i] = np.frombuffer(_encode_jpeg(bgr), dtype=np.uint8)
+
+
+def _make_mismatched_size_hdf5(h5_path: Path, cam_name: str, n_frames: int, bad_frame_idx: int) -> None:
+    """生成帧尺寸不一致的合成 hdf5（bad_frame_idx 帧用不同 HxW）。"""
+    H, W = 16, 16
+    H_bad, W_bad = 32, 32  # 与首帧不同的尺寸
+    vlen_u8 = h5py.vlen_dtype(np.uint8)
+    with h5py.File(h5_path, "w") as h5:
+        h5.create_dataset("observations/arm/joints", data=np.zeros((n_frames, 7), dtype=np.float32))
+        h5.create_dataset("observations/arm/gripper", data=np.zeros((n_frames, 1), dtype=np.float32))
+        h5.create_dataset("observations/arm/ee_pose", data=np.zeros((n_frames, 6), dtype=np.float32))
+        h5.create_dataset("action", data=np.zeros((n_frames, 7), dtype=np.float32))
+        ds = h5.create_dataset(
+            f"observations/camera/rgb/{cam_name}/images",
+            shape=(n_frames,),
+            dtype=vlen_u8,
+        )
+        for i in range(n_frames):
+            if i == bad_frame_idx:
+                bgr = np.full((H_bad, W_bad, 3), [100, 128, 200], dtype=np.uint8)
+            else:
+                bgr = np.full((H, W, 3), [100, 128, 200], dtype=np.uint8)
+            ds[i] = np.frombuffer(_encode_jpeg(bgr), dtype=np.uint8)
+
+
+class TestEpisodeToVideosErrorHandling:
+    """错误处理测试：坏 jpeg / 帧尺寸不一致 / 失败无残留。"""
+
+    CAM_NAME = "cam_test"
+
+    def test_bad_jpeg_raises_value_error(self, tmp_path):
+        """中间帧包含非法 jpeg bytes 时，应抛出包含"解码失败"的 ValueError。"""
+        h5_path = tmp_path / "bad_jpeg.h5"
+        # 第 1 帧（非首帧）为坏 jpeg，确保首帧正常可以建立 H/W
+        _make_bad_jpeg_hdf5(h5_path, self.CAM_NAME, n_frames=3, bad_frame_idx=1)
+        out_dir = tmp_path / "out_bad_jpeg"
+        with pytest.raises(ValueError, match="解码失败"):
+            episode_to_videos(
+                h5_path=str(h5_path),
+                out_dir=str(out_dir),
+                episode_chunk=0,
+                episode_index=0,
+                cam_names=[self.CAM_NAME],
+                fps=30,
+            )
+
+    def test_mismatched_frame_size_raises_value_error(self, tmp_path):
+        """某帧尺寸与首帧不一致时，应抛出包含"尺寸"的 ValueError。"""
+        h5_path = tmp_path / "mismatch.h5"
+        # 第 2 帧（非首帧）尺寸不同
+        _make_mismatched_size_hdf5(h5_path, self.CAM_NAME, n_frames=3, bad_frame_idx=2)
+        out_dir = tmp_path / "out_mismatch"
+        with pytest.raises(ValueError, match="尺寸"):
+            episode_to_videos(
+                h5_path=str(h5_path),
+                out_dir=str(out_dir),
+                episode_chunk=0,
+                episode_index=0,
+                cam_names=[self.CAM_NAME],
+                fps=30,
+            )
+
+    def test_failure_leaves_no_residual_files(self, tmp_path):
+        """坏 jpeg 触发异常后，out_mp4 和 tmp 文件均不存在（原子写保证无残留）。"""
+        h5_path = tmp_path / "bad_jpeg2.h5"
+        _make_bad_jpeg_hdf5(h5_path, self.CAM_NAME, n_frames=3, bad_frame_idx=1)
+        out_dir = tmp_path / "out_no_residual"
+
+        # 确认异常被抛出
+        with pytest.raises(ValueError):
+            episode_to_videos(
+                h5_path=str(h5_path),
+                out_dir=str(out_dir),
+                episode_chunk=0,
+                episode_index=0,
+                cam_names=[self.CAM_NAME],
+                fps=30,
+            )
+
+        # 验证 mp4 和 tmp 均不存在
+        vid_dir = out_dir / "videos" / "chunk-000" / f"observation.images.{self.CAM_NAME}"
+        out_mp4 = vid_dir / "episode_000000.mp4"
+        tmp_mp4 = vid_dir / "episode_000000.mp4.tmp"
+        assert not out_mp4.exists(), f"失败后 mp4 仍残留: {out_mp4}"
+        assert not tmp_mp4.exists(), f"失败后 tmp 仍残留: {tmp_mp4}"

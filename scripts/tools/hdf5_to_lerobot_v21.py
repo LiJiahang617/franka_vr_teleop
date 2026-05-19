@@ -15,6 +15,7 @@ CLI 用法：
 
 import json
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -364,8 +365,9 @@ def episode_to_videos(
     """将 franka-hdf5-v1 episode 各相机图像编码为 h264 mp4 文件。
 
     与 map._decode 通道约定一致：jpeg bytes → BGR(cv2.imdecode) → RGB(cvtColor)
-    以 rgb24 喂 ffmpeg，产 yuv420p h264（同 realman 实测参数）。
+    以 rgb24 喂 ffmpeg（流式逐帧写 stdin），产 yuv420p h264（同 realman 实测参数）。
     规避 SVT-AV1 <32px 崩溃：始终用 libx264。
+    原子写：先输出 <name>.mp4.tmp，成功后 os.replace 为最终 mp4。
 
     Args:
         h5_path: franka-hdf5-v1 文件路径
@@ -387,12 +389,14 @@ def episode_to_videos(
             if n_frames == 0:
                 raise ValueError(f"episode_to_videos: {cam_name} 0 帧，无法编码")
 
-            # 第 0 帧确定 H, W
+            # 第 0 帧确定 H, W，同时校验解码成功
             frame0_bytes = bytes(ds[0])
             frame0_bgr = cv2.imdecode(np.frombuffer(frame0_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if frame0_bgr is None:
+                raise ValueError(f"episode_to_videos: {cam_name} 第 0 帧 jpeg 解码失败")
             H, W = frame0_bgr.shape[:2]
 
-            # 准备输出目录和文件路径
+            # 准备输出目录和路径（先写 tmp，成功后原子改名）
             vid_dir = (
                 Path(out_dir)
                 / "videos"
@@ -401,22 +405,11 @@ def episode_to_videos(
             )
             vid_dir.mkdir(parents=True, exist_ok=True)
             out_mp4 = vid_dir / f"episode_{episode_index:06d}.mp4"
+            tmp_mp4 = vid_dir / f"episode_{episode_index:06d}.mp4.tmp"
 
-            # 收集所有帧的 RGB bytes（逐帧 jpeg → BGR → RGB）
-            raw_frames = bytearray()
-            # 第 0 帧已解码，直接转 RGB 复用
-            frame0_rgb = cv2.cvtColor(frame0_bgr, cv2.COLOR_BGR2RGB)
-            raw_frames.extend(frame0_rgb.tobytes())
-
-            for i in range(1, n_frames):
-                buf = bytes(ds[i])
-                bgr = cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR)
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                raw_frames.extend(rgb.tobytes())
-
-            # ffmpeg 编码：stdin 喂 rgb24 raw，输出 libx264 yuv420p mp4
+            # ffmpeg 命令：读 rgb24 stdin，输出 libx264 yuv420p mp4（写 tmp）
             cmd = [
-                "ffmpeg", "-y",
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "rawvideo",
                 "-pix_fmt", "rgb24",
                 "-s", f"{W}x{H}",
@@ -426,14 +419,74 @@ def episode_to_videos(
                 "-pix_fmt", "yuv420p",
                 "-r", str(fps),
                 "-an",
-                str(out_mp4),
+                "-f", "mp4",
+                str(tmp_mp4),
             ]
-            result = subprocess.run(cmd, input=bytes(raw_frames), capture_output=True)
-            if result.returncode != 0:
+
+            # 流式写 stdin：逐帧 jpeg → BGR → RGB → proc.stdin，避免全量缓冲
+            timeout_s = max(120, n_frames * 2)
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                raise RuntimeError("episode_to_videos: 系统未找到 ffmpeg, 请确认已安装且在 PATH")
+
+            try:
+                # 第 0 帧已解码，转 RGB 后写入
+                frame0_rgb = cv2.cvtColor(frame0_bgr, cv2.COLOR_BGR2RGB)
+                proc.stdin.write(frame0_rgb.tobytes())
+
+                for i in range(1, n_frames):
+                    buf = bytes(ds[i])
+                    bgr = cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR)
+                    if bgr is None:
+                        raise ValueError(f"episode_to_videos: {cam_name} 第 {i} 帧 jpeg 解码失败")
+                    if bgr.shape[:2] != (H, W):
+                        raise ValueError(
+                            f"episode_to_videos: {cam_name} 第 {i} 帧尺寸 {bgr.shape[:2]} != 首帧 {(H, W)}"
+                        )
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    proc.stdin.write(rgb.tobytes())
+
+                proc.stdin.close()
+                err = proc.stderr.read()
+                try:
+                    proc.wait(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    raise RuntimeError(f"episode_to_videos: ffmpeg 超时（{cam_name}，{timeout_s}s）")
+
+            except BrokenPipeError:
+                # ffmpeg 提前退出（如格式错误），读 stderr 后抛出
+                err = proc.stderr.read()
+                proc.wait()
                 raise RuntimeError(
-                    f"ffmpeg 编码失败（{cam_name}）: {result.stderr.decode(errors='replace')[-2000:]}"
+                    f"episode_to_videos: ffmpeg 提前退出（{cam_name}）: "
+                    f"{err.decode(errors='replace')[-2000:]}"
+                )
+            except Exception:
+                # 任何异常：确保 proc 终止，删 tmp，向上抛
+                try:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
+                tmp_mp4.unlink(missing_ok=True)
+                raise
+
+            if proc.returncode != 0:
+                tmp_mp4.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"episode_to_videos: ffmpeg 编码失败（{cam_name}）: "
+                    f"{err.decode(errors='replace')[-2000:]}"
                 )
 
+            # 原子改名：tmp → 最终 mp4
+            os.replace(tmp_mp4, out_mp4)
             out_paths[cam_name] = out_mp4
 
     return out_paths
