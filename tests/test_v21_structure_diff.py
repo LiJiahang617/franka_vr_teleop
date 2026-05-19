@@ -334,3 +334,88 @@ def test_video_file_naming(out_dir):
     for f in video_files:
         rel = f.relative_to(out_dir).as_posix()
         assert pat.fullmatch(rel), f"video 文件路径不匹配正则: {rel!r}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 测试：Codex review-fix Imp#1-4 — realman 兼容守门强化
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_info_splits_format(out_dir):
+    """Imp#1: splits.train 格式为 '起:止'，且语义上为 '0:total_episodes'。"""
+    info = json.loads((out_dir / "meta" / "info.json").read_text())
+    s = info["splits"]
+    assert isinstance(s, dict), f"splits 应为 dict，实为 {type(s)}"
+    assert "train" in s, f"splits 缺 'train' 键: {s!r}"
+    assert re.fullmatch(r"\d+:\d+", s["train"]), f"splits.train 非 '起:止' 格式: {s['train']!r}"
+    lo, hi = s["train"].split(":")
+    assert int(lo) == 0 and int(hi) == info["total_episodes"], (
+        f"splits.train {s['train']!r} 应为 '0:{info['total_episodes']}'"
+        f"（total_episodes={info['total_episodes']}）"
+    )
+
+
+def test_info_numeric_fields_are_int(out_dir):
+    """Imp#2: fps/total_* 等数值字段在 JSON 中应为 int（守住 T4 fps=int() 修复不被回退）。"""
+    info = json.loads((out_dir / "meta" / "info.json").read_text())
+    int_fields = [
+        "fps", "total_episodes", "total_frames", "total_tasks",
+        "total_videos", "total_chunks", "chunks_size",
+    ]
+    for k in int_fields:
+        v = info[k]
+        # bool 是 int 子类，须单独排除（json.loads 不会产生 bool，但守住类型语义）
+        assert isinstance(v, int) and not isinstance(v, bool), (
+            f"info.{k} 应为 int（realman v2.1 约定），实为 {type(v).__name__}={v!r}"
+        )
+
+
+def test_info_robot_type_is_franka(out_dir):
+    """Imp#3: robot_type 应为 'franka'（§11.5 修 v3.0 null 缺口，fixture 传 robot_type='franka'）。"""
+    info = json.loads((out_dir / "meta" / "info.json").read_text())
+    assert info["robot_type"] == "franka", (
+        f"robot_type={info['robot_type']!r} 应为 'franka'"
+    )
+
+
+def test_meta_counts_cross_consistent(out_dir):
+    """Imp#4: tasks/episodes/stats 行数与 info totals 交叉一致，episode_index 连续，total_videos 交叉核验。"""
+    info = json.loads((out_dir / "meta" / "info.json").read_text())
+
+    # 读取三个 jsonl 的行列表
+    task_lines = (out_dir / "meta" / "tasks.jsonl").read_text().strip().splitlines()
+    ep_lines = (out_dir / "meta" / "episodes.jsonl").read_text().strip().splitlines()
+    stat_lines = (out_dir / "meta" / "episodes_stats.jsonl").read_text().strip().splitlines()
+
+    # 行数与 info totals 一致
+    assert len(task_lines) == info["total_tasks"], (
+        f"tasks.jsonl 行数 {len(task_lines)} != info.total_tasks {info['total_tasks']}"
+    )
+    assert len(ep_lines) == info["total_episodes"], (
+        f"episodes.jsonl 行数 {len(ep_lines)} != info.total_episodes {info['total_episodes']}"
+    )
+    assert len(stat_lines) == info["total_episodes"], (
+        f"episodes_stats.jsonl 行数 {len(stat_lines)} != info.total_episodes {info['total_episodes']}"
+    )
+
+    # episodes length 之和 == total_frames
+    total_frames_sum = sum(json.loads(l)["length"] for l in ep_lines)
+    assert total_frames_sum == info["total_frames"], (
+        f"episodes length 之和 {total_frames_sum} 应 == info.total_frames {info['total_frames']}"
+    )
+
+    # episode_index 集合在 episodes/stats 中连续且一致
+    ep_idx = {json.loads(l)["episode_index"] for l in ep_lines}
+    st_idx = {json.loads(l)["episode_index"] for l in stat_lines}
+    expected = set(range(info["total_episodes"]))
+    assert ep_idx == st_idx == expected, (
+        f"episode_index 集应为 0..{info['total_episodes'] - 1} 连续且 episodes/stats 一致: "
+        f"ep={ep_idx} st={st_idx}"
+    )
+
+    # total_videos 交叉核验：应 == total_episodes × 相机数
+    cam_keys = [k for k in info["features"] if k.startswith("observation.images.")]
+    expected_videos = info["total_episodes"] * len(cam_keys)
+    assert info["total_videos"] == expected_videos, (
+        f"info.total_videos {info['total_videos']} 应 == "
+        f"total_episodes({info['total_episodes']}) × 相机数({len(cam_keys)}) = {expected_videos}"
+    )
