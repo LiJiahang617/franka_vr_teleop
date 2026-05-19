@@ -229,3 +229,141 @@ def test_parse_axis_gain_bool_element_rejected():
     import pytest
     with pytest.raises(ValueError, match="bool"):
         rp.parse_axis_gain([True, 1.0, 1.0], key_name="k")
+"""追加到 test_record_params.py 的 resolve_record_overrides 测试。"""
+import importlib.util, os
+from types import SimpleNamespace
+
+_P = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_s = importlib.util.spec_from_file_location(
+    "record_params", os.path.join(_P, "scripts/core/record_params.py"))
+rp = importlib.util.module_from_spec(_s); _s.loader.exec_module(rp)
+
+
+def _make_cfg(*, episodes=10, episode_sec=120.0, out_dir="/data/recs",
+              task_description="pick apple", oc2base_path="/cal/R.npy"):
+    """构造假 RecordConfig-like 对象（纯 SimpleNamespace，不依赖硬件）。"""
+    return SimpleNamespace(
+        num_episodes=episodes,
+        episode_time_sec=episode_sec,
+        out_dir=out_dir,
+        task_description=task_description,
+        oc2base_path=oc2base_path,
+    )
+
+
+_FALLBACK_DIR = "/default/fallback"
+
+
+# ================================================================
+# resolve_record_overrides 纯函数测
+# ================================================================
+
+def test_resolve_overrides_all_cli_none_takes_cfg():
+    """CLI 全 None → 取 cfg 各字段。"""
+    cfg = _make_cfg()
+    res = rp.resolve_record_overrides(
+        cli_episodes=None, cli_episode_sec=None, cli_out_dir=None,
+        cli_task_name=None, cli_oc2base=None,
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["episodes"] == cfg.num_episodes
+    assert res["episode_sec"] == cfg.episode_time_sec
+    assert res["out_dir"] == cfg.out_dir
+    assert res["task_name"] == cfg.task_description
+    assert res["oc2base_path"] == cfg.oc2base_path
+
+
+def test_resolve_overrides_cli_values_override_cfg():
+    """CLI 给值 → 覆盖 cfg 对应字段。"""
+    cfg = _make_cfg()
+    res = rp.resolve_record_overrides(
+        cli_episodes=3, cli_episode_sec=30.0, cli_out_dir="/tmp/out",
+        cli_task_name="custom_task", cli_oc2base="/cal/custom_R.npy",
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["episodes"] == 3
+    assert res["episode_sec"] == 30.0
+    assert res["out_dir"] == "/tmp/out"
+    assert res["task_name"] == "custom_task"
+    assert res["oc2base_path"] == "/cal/custom_R.npy"
+
+
+def test_resolve_overrides_partial_cli_mixed():
+    """部分 CLI 给值，部分 None → 给了的覆盖，None 的回退 cfg。"""
+    cfg = _make_cfg()
+    res = rp.resolve_record_overrides(
+        cli_episodes=5, cli_episode_sec=None, cli_out_dir=None,
+        cli_task_name="cli_task", cli_oc2base=None,
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["episodes"] == 5                         # CLI 覆盖
+    assert res["episode_sec"] == cfg.episode_time_sec   # cfg 回退
+    assert res["out_dir"] == cfg.out_dir                # cfg 回退
+    assert res["task_name"] == "cli_task"               # CLI 覆盖
+    assert res["oc2base_path"] == cfg.oc2base_path      # cfg 回退
+
+
+def test_resolve_overrides_out_dir_two_level_fallback():
+    """out_dir: CLI None 且 cfg.out_dir None → 回退 out_dir_fallback 常量。"""
+    cfg = _make_cfg(out_dir=None)
+    res = rp.resolve_record_overrides(
+        cli_episodes=None, cli_episode_sec=None, cli_out_dir=None,
+        cli_task_name=None, cli_oc2base=None,
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["out_dir"] == _FALLBACK_DIR
+
+
+def test_resolve_overrides_out_dir_cli_wins_over_both():
+    """CLI 给 out_dir → 覆盖 cfg.out_dir 和 fallback。"""
+    cfg = _make_cfg(out_dir=None)
+    res = rp.resolve_record_overrides(
+        cli_episodes=None, cli_episode_sec=None, cli_out_dir="/cli/dir",
+        cli_task_name=None, cli_oc2base=None,
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["out_dir"] == "/cli/dir"
+
+
+def test_resolve_overrides_task_name_falls_back_to_description():
+    """task_name CLI None → 回退 cfg.task_description（非 cli or cfg falsy 误判）。"""
+    cfg = _make_cfg(task_description="detailed task desc")
+    res = rp.resolve_record_overrides(
+        cli_episodes=None, cli_episode_sec=None, cli_out_dir=None,
+        cli_task_name=None, cli_oc2base=None,
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["task_name"] == "detailed task desc"
+
+
+def test_resolve_overrides_strict_is_none_episodes_zero_not_falsy():
+    """严格 is None: CLI episodes=0 (falsy 但非 None) → 应覆盖，不被误当未给。"""
+    cfg = _make_cfg(episodes=10)
+    res = rp.resolve_record_overrides(
+        cli_episodes=0, cli_episode_sec=None, cli_out_dir=None,
+        cli_task_name=None, cli_oc2base=None,
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["episodes"] == 0   # 0 是显式 CLI，不能被 or 误当 None
+
+
+def test_resolve_overrides_strict_is_none_episode_sec_zero():
+    """严格 is None: CLI episode_sec=0.0 → 覆盖，不回退 cfg。"""
+    cfg = _make_cfg(episode_sec=120.0)
+    res = rp.resolve_record_overrides(
+        cli_episodes=None, cli_episode_sec=0.0, cli_out_dir=None,
+        cli_task_name=None, cli_oc2base=None,
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["episode_sec"] == 0.0
+
+
+def test_resolve_overrides_strict_is_none_empty_string_task_name():
+    """严格 is None: CLI task_name='' (falsy 但非 None) → 覆盖，不回退 cfg.task_description。"""
+    cfg = _make_cfg(task_description="from cfg")
+    res = rp.resolve_record_overrides(
+        cli_episodes=None, cli_episode_sec=None, cli_out_dir=None,
+        cli_task_name="", cli_oc2base=None,
+        record_cfg=cfg, out_dir_fallback=_FALLBACK_DIR,
+    )
+    assert res["task_name"] == ""   # "" 是 CLI 显式给定，不应回退

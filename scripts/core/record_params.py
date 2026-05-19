@@ -159,3 +159,61 @@ def parse_axis_gain(value, *, key_name: str, default=(1.0, 1.0, 1.0)) -> list:
             raise ValueError(f"{key_name}[{i}] 必须有限(非 nan/inf), got {xf!r}")
         out.append(xf)
     return out
+
+
+def resolve_record_overrides(
+    *,
+    cli_episodes,
+    cli_episode_sec,
+    cli_out_dir,
+    cli_task_name,
+    cli_oc2base,
+    record_cfg,
+    out_dir_fallback: str,
+) -> dict:
+    """CLI None 仅覆盖语义：CLI 给了用 CLI（临时覆盖），否则读 RecordConfig（唯一真值）。
+
+    严格 `is None` 判断，禁用 `cli or cfg` falsy 误判（0/""/False 均视为显式给定）。
+    out_dir 二级回退：CLI None 且 cfg.out_dir None → 用 out_dir_fallback 常量。
+    task_name CLI None → 回退 cfg.task_description（yaml 里 task.description）。
+
+    Args:
+        cli_episodes:      CLI --episodes 值（None=未给）。
+        cli_episode_sec:   CLI --episode-sec 值（None=未给）。
+        cli_out_dir:       CLI --out-dir 值（None=未给）。
+        cli_task_name:     CLI --task-name 值（None=未给）。
+        cli_oc2base:       CLI --oc2base-R 值（None=未给）。
+        record_cfg:        RecordConfig 实例（含 num_episodes/episode_time_sec/
+                           out_dir/task_description/oc2base_path）。
+        out_dir_fallback:  当 CLI 和 cfg.out_dir 均为 None 时的二级回退路径常量。
+
+    Returns:
+        dict 含 episodes/episode_sec/out_dir/task_name/oc2base_path 解析结果。
+    """
+    # episodes: CLI 给了覆盖，否则 cfg.num_episodes
+    episodes = cli_episodes if cli_episodes is not None else record_cfg.num_episodes
+
+    # episode_sec: CLI 给了覆盖，否则 cfg.episode_time_sec
+    episode_sec = cli_episode_sec if cli_episode_sec is not None else record_cfg.episode_time_sec
+
+    # out_dir: 二级回退 — CLI > cfg.out_dir > fallback 常量
+    if cli_out_dir is not None:
+        out_dir = cli_out_dir
+    elif record_cfg.out_dir is not None:
+        out_dir = record_cfg.out_dir
+    else:
+        out_dir = out_dir_fallback
+
+    # task_name: CLI 给了覆盖，否则 cfg.task_description（yaml task.description）
+    task_name = cli_task_name if cli_task_name is not None else record_cfg.task_description
+
+    # oc2base_path: CLI 给了覆盖，否则 cfg.oc2base_path（接通 RecordConfig.oc2base_path）
+    oc2base_path = cli_oc2base if cli_oc2base is not None else record_cfg.oc2base_path
+
+    return {
+        "episodes": episodes,
+        "episode_sec": episode_sec,
+        "out_dir": out_dir,
+        "task_name": task_name,
+        "oc2base_path": oc2base_path,
+    }

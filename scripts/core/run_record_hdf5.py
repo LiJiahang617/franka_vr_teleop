@@ -32,7 +32,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 from core import paths as _paths
 from core.async_saver import AsyncEpisodeSaver
 from core.hdf5_writer import write_episode
-from core.record_params import resolve_record_fps, extract_joint_vel, realsense_fps, parse_reset_config
+from core.record_params import resolve_record_fps, extract_joint_vel, realsense_fps, parse_reset_config, resolve_record_overrides
 
 # 硬件依赖（franka/lerobot 真实包）：延迟到函数内 import，避免测试加载时爆
 # RecordConfig → from run_record import RecordConfig  (在 build_robot_and_teleop/main 内)
@@ -319,11 +319,11 @@ def main():
     ap = argparse.ArgumentParser(description="hdf5 录制入口（franka-hdf5-v1）")
     ap.add_argument("--config", required=True, help="record_cfg.yaml 路径")
     ap.add_argument("--fps", type=float, default=None, help="录制帧率(默认读 cfg.fps; 给了则临时覆盖)")
-    ap.add_argument("--episodes", type=int, default=1, help="录制 episode 数")
-    ap.add_argument("--episode-sec", type=float, default=60.0, help="每 episode 最长时间（秒）")
-    ap.add_argument("--out-dir", default=_paths.HDF5_EPISODES_DIR,
-                    help="输出目录")
-    ap.add_argument("--task-name", default="task", help="任务名称写入 hdf5")
+    ap.add_argument("--episodes", type=int, default=None, help="录制 episode 数(默认读 cfg.task.num_episodes; 给了则临时覆盖)")
+    ap.add_argument("--episode-sec", type=float, default=None, help="每 episode 最长时间（秒）(默认读 cfg.time.episode_time_sec; 给了则临时覆盖)")
+    ap.add_argument("--out-dir", default=None,
+                    help="输出目录(默认读 cfg.out_dir; 给了则临时覆盖)")
+    ap.add_argument("--task-name", default=None, help="任务名称写入 hdf5(默认读 cfg.task.description; 给了则临时覆盖)")
     # 标定文件（oc2base_R），Task3 用；此处允许缺失并用单位矩阵占位
     ap.add_argument("--oc2base-R", default=None,
                     help="oc2base_R .npy 路径（缺失则用单位矩阵）")
@@ -338,20 +338,39 @@ def main():
     fps = resolve_record_fps(a.fps, record_cfg.fps)
     log.info(f"[REC] 录制频率单一来源 fps={fps}（相机/循环/写盘同源）")
 
-    # 从 raw dict 读取 reset 配置（不改 RecordConfig 类，守 Phase C 范围）
-    # reset_between_episodes: 是否在 episode 间调用 robot.reset() 回 home；默认 True
-    # reset_wait: reset 后等待时间（秒），等待机械臂稳定；默认 1.0
-    reset_between_episodes, reset_wait_sec = parse_reset_config(raw.get("record", {}))
+    # CLI None 仅覆盖：各录制超参从 RecordConfig 读（单一真值），CLI 给了才临时覆盖
+    # 严格 is None 判断，禁 cli or cfg（0/""/False falsy 误判）；参 resolve_record_fps 范式
+    overrides = resolve_record_overrides(
+        cli_episodes=a.episodes,
+        cli_episode_sec=a.episode_sec,
+        cli_out_dir=a.out_dir,
+        cli_task_name=a.task_name,
+        cli_oc2base=a.oc2base_R,
+        record_cfg=record_cfg,
+        out_dir_fallback=_paths.HDF5_EPISODES_DIR,
+    )
+    episodes = overrides["episodes"]
+    episode_sec = overrides["episode_sec"]
+    out_dir = overrides["out_dir"]
+    task_name = overrides["task_name"]
+    oc2base_path = overrides["oc2base_path"]
+    log.info(f"[REC] episodes={episodes}, episode_sec={episode_sec}, out_dir={out_dir}")
+    log.info(f"[REC] task_name={task_name!r}, oc2base_path={oc2base_path!r}")
 
-    # 标定矩阵
-    if a.oc2base_R and os.path.exists(a.oc2base_R):
-        R = np.load(a.oc2base_R)
+    # reset 配置：读 RecordConfig（T3 已迁入，单一真源，parse_reset_config 已在底层调用）
+    reset_between_episodes = record_cfg.reset_between_episodes
+    reset_wait_sec = record_cfg.reset_wait
+
+    # 标定矩阵：经 resolve_record_overrides 接通 RecordConfig.oc2base_path（CLI 覆盖优先）
+    # 文件缺失降级为 np.eye(3)+warning（Phase A 语义保留，不强制要求标定文件存在）
+    if oc2base_path is not None and os.path.exists(oc2base_path):
+        R = np.load(oc2base_path)
     else:
-        log.warning("[REC] oc2base_R 未提供，使用单位矩阵占位")
+        log.warning("[REC] oc2base_R 未提供或文件不存在，使用单位矩阵占位")
         R = np.eye(3)
 
     robot, teleop, gripper_max_open = build_robot_and_teleop(record_cfg, fps)
-    os.makedirs(a.out_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
 
     # 相机名与 HDF5 schema 对应：wrist_image, exterior_image
     cam_names = list(robot.cameras.keys())
@@ -385,8 +404,8 @@ def main():
         if not gripper_verdict.ok:
             _preflight_abort(robot, teleop, f"夹爪预检失败: {gripper_verdict.reason}")
 
-    # 2. 色彩预检（默认开启；raw dict 可设 color_preflight: false 关闭）
-    color_preflight_enabled = raw.get("record", {}).get("color_preflight", True)
+    # 2. 色彩预检（默认开启；RecordConfig.color_preflight 单一来源，yaml 可设 color_preflight: false 关闭）
+    color_preflight_enabled = record_cfg.color_preflight
     if color_preflight_enabled:
         log.info("[PREFLIGHT] 采首帧运行色彩通道序预检…")
         encoded_pf = []
@@ -436,14 +455,14 @@ def main():
             run_episodes(
                 robot, teleop, saver,
                 fps=fps,
-                episode_sec=a.episode_sec,
+                episode_sec=episode_sec,
                 gripper_max_open=gripper_max_open,
                 cam_names=cam_names,
-                out_dir=a.out_dir,
-                task_name=a.task_name,
+                out_dir=out_dir,
+                task_name=task_name,
                 oc2base_R=R,
                 vr_source=record_cfg.control_mode,
-                episodes=a.episodes,
+                episodes=episodes,
                 decide=decide,
                 reset_fn=robot.reset if reset_between_episodes else None,
                 reset_wait=reset_wait_sec,
