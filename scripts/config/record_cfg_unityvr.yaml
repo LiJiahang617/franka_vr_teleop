@@ -6,7 +6,7 @@ record:
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
   user_notes:  # any additional notes about the dataset
-  fps: 15 # dataset and camera frame rate
+  fps: 30 # 录制频率单一来源(相机/循环/写盘同源); CLI --fps 仅临时覆盖
   control_mode: &control_mode "unityvr" # unityvr(世界系,头显独立) / isoteleop / spacemouse / oculus
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 

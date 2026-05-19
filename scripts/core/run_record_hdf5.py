@@ -26,6 +26,7 @@ sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop")
 sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts")
 
 from core.hdf5_writer import HDF5EpisodeWriter
+from core.record_params import resolve_record_fps, extract_joint_vel
 
 # 复用既有 run_record 的 RecordConfig 和构造工具
 from run_record import RecordConfig
@@ -39,7 +40,7 @@ log = logging.getLogger("rec_hdf5")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-def build_robot_and_teleop(record_cfg: RecordConfig):
+def build_robot_and_teleop(record_cfg: RecordConfig, fps: float):
     """按既有 run_record.py 同款构造 robot 和 teleop。
 
     Returns:
@@ -48,7 +49,7 @@ def build_robot_and_teleop(record_cfg: RecordConfig):
     # 相机配置（与 run_record.py 完全一致）
     wrist_image_cfg = RealSenseCameraConfig(
         serial_number_or_name=record_cfg.wrist_cam_serial,
-        fps=record_cfg.fps,
+        fps=fps,
         width=record_cfg.width,
         height=record_cfg.height,
         color_mode=ColorMode.RGB,
@@ -57,7 +58,7 @@ def build_robot_and_teleop(record_cfg: RecordConfig):
     )
     exterior_image_cfg = RealSenseCameraConfig(
         serial_number_or_name=record_cfg.exterior_cam_serial,
-        fps=record_cfg.fps,
+        fps=fps,
         width=record_cfg.width,
         height=record_cfg.height,
         color_mode=ColorMode.RGB,
@@ -182,7 +183,7 @@ def record_episode(robot, teleop, writer: HDF5EpisodeWriter,
 def main():
     ap = argparse.ArgumentParser(description="hdf5 录制入口（franka-hdf5-v1）")
     ap.add_argument("--config", required=True, help="record_cfg.yaml 路径")
-    ap.add_argument("--fps", type=float, default=30.0, help="录制帧率（默认 30）")
+    ap.add_argument("--fps", type=float, default=None, help="录制帧率(默认读 cfg.fps; 给了则临时覆盖)")
     ap.add_argument("--episodes", type=int, default=1, help="录制 episode 数")
     ap.add_argument("--episode-sec", type=float, default=60.0, help="每 episode 最长时间（秒）")
     ap.add_argument("--out-dir", default="/home/ubuntu/Desktop/jhli/_hdf5_episodes",
@@ -196,6 +197,8 @@ def main():
     with open(a.config) as fh:
         raw = yaml.safe_load(fh)
     record_cfg = RecordConfig(raw["record"])
+    fps = resolve_record_fps(a.fps, record_cfg.fps)
+    log.info(f"[REC] 录制频率单一来源 fps={fps}（相机/循环/写盘同源）")
 
     # 标定矩阵
     if a.oc2base_R and os.path.exists(a.oc2base_R):
@@ -204,7 +207,7 @@ def main():
         log.warning("[REC] oc2base_R 未提供，使用单位矩阵占位")
         R = np.eye(3)
 
-    robot, teleop, gripper_max_open = build_robot_and_teleop(record_cfg)
+    robot, teleop, gripper_max_open = build_robot_and_teleop(record_cfg, fps)
     os.makedirs(a.out_dir, exist_ok=True)
 
     # 相机名与 HDF5 schema 对应：wrist_image, exterior_image
@@ -217,14 +220,14 @@ def main():
             w = HDF5EpisodeWriter(
                 path=path,
                 task_name=a.task_name,
-                target_fps=a.fps,
+                target_fps=fps,
                 oc2base_R=R,
                 quality={},
                 vr_source=record_cfg.control_mode,
                 cam_names=cam_names,
             )
             log.info(f"[REC] episode {ep} → {path}，录制 {a.episode_sec}s")
-            record_episode(robot, teleop, w, a.fps, a.episode_sec,
+            record_episode(robot, teleop, w, fps, a.episode_sec,
                            gripper_max_open, cam_names)
             w.close()
             log.info(f"[REC] episode {ep} 写盘+自检通过")
