@@ -31,16 +31,6 @@ def test_repo_root_on_syspath_shadows_editable_without_guard():
 
 
 
-def test_run_record_hdf5_preimports_before_syspath_insert():
-    # 结构回归: run_record_hdf5.py 里 pre-import 必须出现在注入仓库根之前,
-    # 防止以后有人调换顺序又把真包遮蔽掉。
-    src = open(f"{REPO}/scripts/core/run_record_hdf5.py").read()
-    i_pre = src.find("import lerobot_robot_franka")
-    i_insert = src.find(
-        "sys.path.insert(0, \"/home/ubuntu/Desktop/jhli/lerobot_franka_teleop\")")
-    assert i_pre != -1, "缺少 pre-import 守卫"
-    assert i_insert != -1, "未找到仓库根 sys.path.insert"
-    assert i_pre < i_insert, "pre-import 必须在 sys.path.insert(repo) 之前"
 
 
 def test_vr_modules_importable_from_teleop_package():
@@ -64,5 +54,33 @@ def test_vr_modules_importable_from_teleop_package():
         " and m.vr_align.__name__=='lerobot_teleoperator_franka.vr_align'"
         " and m.UnityVRReader.__module__=='lerobot_teleoperator_franka.unity_vr_reader';"
         "print('OK' if ok else 'BAD a=%s u=%s m=%s'%(a.__file__,u.__file__,m.__file__))"
+    )
+    assert r.stdout.strip() == "OK", (r.stdout, r.stderr)
+
+
+def test_run_record_hdf5_no_repo_root_syspath():
+    # §11.1: run_record_hdf5.py 不得再把 repo 根塞 sys.path(只允许 scripts),
+    # 且 Task3 期 pre-import 守卫块已随根因消失而删净。
+    src = open(f"{REPO}/scripts/core/run_record_hdf5.py").read()
+    assert 'sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop")' \
+        not in src, "run_record_hdf5 仍有 repo-根 sys.path.insert"
+    assert "import lerobot_robot_franka  # noqa: F401" not in src, \
+        "Task3 pre-import 守卫块未删净"
+
+
+def test_editable_pkg_resolves_even_if_repo_root_on_path():
+    # §11.1 核心保证(对抗式): 即便人为把 repo 根插到 sys.path[0],
+    # lerobot_teleoperator_franka 子模块仍解析到双层嵌套 editable 真包内文件,
+    # 非 repo-根单层命名空间遮蔽副本。(顶层命名空间包 __file__=None 合法,
+    # 故只断言子模块真文件 + 双层嵌套签名, 与 Task2 守门③同口径。)
+    r = _probe(
+        f"import sys, pathlib; sys.path.insert(0, {REPO!r});"
+        "import lerobot_teleoperator_franka.vr_align as a;"
+        "import lerobot_teleoperator_franka.unity_vr_reader as u;"
+        "p=pathlib.Path(a.__file__).resolve().parent;"
+        "ok=(p==pathlib.Path(u.__file__).resolve().parent)"
+        " and p.name=='lerobot_teleoperator_franka'"
+        " and p.parent.name=='lerobot_teleoperator_franka';"
+        "print('OK' if ok else 'SHADOWED a=%s u=%s'%(a.__file__,u.__file__))"
     )
     assert r.stdout.strip() == "OK", (r.stdout, r.stderr)

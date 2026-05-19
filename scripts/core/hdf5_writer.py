@@ -5,8 +5,11 @@ import sys
 import h5py
 import numpy as np
 
-sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop")
-import franka_hdf5_schema as S  # noqa: E402
+import importlib.util as _ilu, os as _os
+_schema_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
+    _os.path.abspath(__file__)))), 'franka_hdf5_schema.py')
+_spec = _ilu.spec_from_file_location('franka_hdf5_schema', _schema_path)
+S = _ilu.module_from_spec(_spec); _spec.loader.exec_module(S)  # noqa: E402
 
 _VLEN_BYTES = h5py.special_dtype(vlen=np.dtype("uint8"))
 

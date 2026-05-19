@@ -20,9 +20,15 @@ import logging
 import sys
 import h5py
 
-sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop")
-sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts")
-import franka_hdf5_schema as S
+import os as _os
+sys.path.insert(0, _os.path.join(
+    _os.environ.get('FRANKA_JHLI_ROOT', '/home/ubuntu/Desktop/jhli'),
+    'lerobot_franka_teleop', 'scripts'))
+import importlib.util as _ilu
+_schema_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
+    _os.path.abspath(__file__)))), 'franka_hdf5_schema.py')
+_spec = _ilu.spec_from_file_location('franka_hdf5_schema', _schema_path)
+S = _ilu.module_from_spec(_spec); _spec.loader.exec_module(S)  # noqa: E402
 from tools.hdf5_lerobot_map import build_feature_specs, hdf5_frame_to_lerobot
 
 log = logging.getLogger("h5->lerobot")

@@ -22,20 +22,12 @@ import cv2
 import numpy as np
 import yaml
 
-# 先于把仓库根注入 sys.path, 解析两个 editable 安装的包并锁进 sys.modules。
-# 根因: 仓库根含与包同名的外层目录 lerobot_robot_franka/ 与
-# lerobot_teleoperator_franka/ (均无 __init__.py)。一旦仓库根进 sys.path,
-# 标准 PathFinder 把它当命名空间包返回 spec, 遮蔽 PEP660 editable 真包,
-# 导致 from lerobot_robot_franka import FrankaConfig 报 unknown location。
-# 此刻仓库根尚未进 sys.path, editable finder 正常解析; 之后
-# from lerobot_robot_franka import ... 命中 sys.modules 缓存。
-# 详见 docs/lessons/2026-05-19-namespace-dir-shadows-editable-install.md
-import lerobot_robot_franka  # noqa: F401,E402
-import lerobot_teleoperator_franka  # noqa: F401,E402
+import os as _os
+sys.path.insert(0, _os.path.join(
+    _os.environ.get('FRANKA_JHLI_ROOT', '/home/ubuntu/Desktop/jhli'),
+    'lerobot_franka_teleop', 'scripts'))
 
-sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop")
-sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts")
-
+from core import paths as _paths
 from core.hdf5_writer import HDF5EpisodeWriter
 from core.record_params import resolve_record_fps, extract_joint_vel, realsense_fps
 
@@ -203,7 +195,7 @@ def main():
     ap.add_argument("--fps", type=float, default=None, help="录制帧率(默认读 cfg.fps; 给了则临时覆盖)")
     ap.add_argument("--episodes", type=int, default=1, help="录制 episode 数")
     ap.add_argument("--episode-sec", type=float, default=60.0, help="每 episode 最长时间（秒）")
-    ap.add_argument("--out-dir", default="/home/ubuntu/Desktop/jhli/_hdf5_episodes",
+    ap.add_argument("--out-dir", default=_paths.HDF5_EPISODES_DIR,
                     help="输出目录")
     ap.add_argument("--task-name", default="task", help="任务名称写入 hdf5")
     # 标定文件（oc2base_R），Task3 用；此处允许缺失并用单位矩阵占位

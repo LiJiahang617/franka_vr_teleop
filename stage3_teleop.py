@@ -29,7 +29,7 @@ from scipy.spatial.transform import Rotation as R
 from lerobot_robot_franka.franka_interface_client import FrankaInterfaceClient
 from lerobot_teleoperator_franka.oculus.oculus_reader import OculusReader
 
-import vr_align
+from lerobot_teleoperator_franka import vr_align
 
 
 # ====== 默认参数 ======
