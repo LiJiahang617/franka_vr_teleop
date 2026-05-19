@@ -20,7 +20,7 @@ echo "CLEANUP_OK"
 
 echo "########## [2/5] launch arm ##########"
 : > "$LOGA"
-setsid bash _run_polymetis_rw.sh </dev/null >"$LOGA" 2>&1 & disown
+setsid bash /home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts/services/_run_polymetis_rw.sh </dev/null >"$LOGA" 2>&1 & disown
 echo "arm launched pid=$!"
 
 echo "########## [3/5] poll arm 50051 + log ##########"
@@ -40,7 +40,7 @@ echo "ARM_OK"
 
 echo "########## [4/5] launch zerorpc ##########"
 : > "$LOGZ"
-setsid bash _run_zerorpc_iface.sh </dev/null >"$LOGZ" 2>&1 & disown
+setsid bash /home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts/services/_run_zerorpc_iface.sh </dev/null >"$LOGZ" 2>&1 & disown
 echo "zerorpc launched pid=$!"
 for i in $(seq 1 25); do ss -ltn 2>/dev/null | grep -q ':4242 ' && { echo "4242 LISTEN ~$((i*2))s"; break; }; sleep 2; done
 ss -ltn 2>/dev/null | grep -q ':4242 ' || { echo "ZERORPC_FAIL 4242 never up"; tail -n 20 "$LOGZ"; exit 1; }
