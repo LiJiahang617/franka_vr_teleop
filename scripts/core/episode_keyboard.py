@@ -32,13 +32,28 @@ headless 降级：
 class EpisodeDecider:
     """把 lerobot events dict 翻译为 decide(ep) 决策器。
 
+    **线程模型**：events dict 由 lerobot ``init_keyboard_listener()`` 的 pynput
+    监听线程写、主线程读，遵循 run_record.py 既有**无锁事件模型**（简单 bool
+    标志，CPython 下读写无撕裂）；本类不引入额外锁以保持与既定模式一致；若将来
+    扩展为复杂共享状态再考虑 lock/快照。
+
     Args:
         events: lerobot ``init_keyboard_listener()`` 返回的 events dict，
                 包含键 "exit_early"、"rerecord_episode"、"stop_recording"。
                 headless 时三者均为 False（安全降级）。
+
+    Raises:
+        KeyError: 当 events 缺少必需键时 fail-loud，带上下文信息。
     """
 
     def __init__(self, events: dict) -> None:
+        _req = ("exit_early", "rerecord_episode", "stop_recording")
+        missing = [k for k in _req if k not in events]
+        if missing:
+            raise KeyError(
+                f"EpisodeDecider: events 缺必需键 {missing}"
+                f"（应来自 lerobot init_keyboard_listener 或完整 fake dict）"
+            )
         self._ev = events
 
     def episode_stop_flag(self):
@@ -58,6 +73,10 @@ class EpisodeDecider:
         """读取 events 状态，返回 "keep"/"discard"/"stop"。
 
         优先级：stop_recording > rerecord_episode > keep（含 headless 全 False）。
+
+        # exit_early 语义=结束当前 ep 并**保存**(finish-and-keep)，故**不**参与
+        # discard/stop 判定、隐式落 keep；勿误改为 discard。
+        # 优先级 stop_recording > rerecord_episode > keep。
         """
         ev = self._ev
         if ev["stop_recording"]:

@@ -352,6 +352,7 @@ def main():
     # decide：读取当前 events 状态，keep/discard 后 reset 逐 ep 标志（stop 不 reset）
     def decide(ep):
         action = dec.decide_after_episode()
+        # stop 故意不 reset：stop_recording 是全局停止标志，保留以让 run_episodes 跳出循环（勿"顺手"在此清理）
         if action in ("keep", "discard"):
             dec.reset_episode_flags()
         return action
