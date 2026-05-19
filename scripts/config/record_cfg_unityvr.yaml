@@ -1,23 +1,38 @@
 record:
-  repo_id: &repo_id "babycare/milk_power_2" 
-  # repo_id: &repo_id "PhysBrain/PnP_Veg" 
+  repo_id: &repo_id "babycare/milk_power_2"
+  # repo_id: &repo_id "PhysBrain/PnP_Veg"
   # repo_id: &repo_id "scylearning/pick_greencube_into_trashb
   # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
-  user_notes:  # any additional notes about the dataset
+  user_notes:  # 数采备注（如环境/任务变化）; hdf5 入口现读此 cfg（CLI 仅覆盖）
   fps: 30 # 录制频率单一来源(相机/循环/写盘同源); CLI --fps 仅临时覆盖
   reset_between_episodes: true  # episode 间自动调 robot.reset() 回 HOME_JOINT_POSITION+夹爪复位; false=关闭
   reset_wait: 1.0               # reset 后等待机械臂稳定的时间（秒）; 仅 run_record_hdf5 读取
   control_mode: &control_mode "unityvr" # unityvr(世界系,头显独立) / isoteleop / spacemouse / oculus
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 
+  # hdf5 输出目录; CLI --out-dir 仅临时覆盖; 缺省回退 paths.HDF5_EPISODES_DIR
+  out_dir: "/home/ubuntu/Desktop/jhli/_hdf5_episodes"
+
+  # §11.2 色彩通道序预检（RealSense BGR vs RGB 误判 guard）; false 关闭
+  color_preflight: true
+
+  # 深度相机采集开关——占位至 Phase D，不写 hdf5 不进 schema
+  depth:
+    enabled: false
+
+  # 高频关节状态采集——占位至 Phase D 同步重构，当前不采集
+  state_hifreq:
+    enabled: false
+    rate: 240  # 目标采集频率 Hz; Phase D 接通时生效
+
   teleop:
-    control_mode: *control_mode 
+    control_mode: *control_mode
     dynamixel_config:
       port: "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
       # hardware_offsets: [0, 0, 0, 0, 0, 0, 0] # The Calibration offsets between the master and the slave robot
-      hardware_offsets: [-0.12183455210997171, -0.002845966063342931, -0.06250428305273764, -2.0498354593763044, 0.05259129256457092, 1.9984585428810417, -0.9046528345737315] 
+      hardware_offsets: [-0.12183455210997171, -0.002845966063342931, -0.06250428305273764, -2.0498354593763044, 0.05259129256457092, 1.9984585428810417, -0.9046528345737315]
       use_gripper: &use_gripper True # 已开: Bug2旋转+RouteB真机验通(2026-05-18)+控制柜重启后启用夹爪
       joint_ids: [0, 1, 2, 3, 4, 5, 6]
       # joint_offsets: [6.283, 3.142, 0.0, 4.712, 4.712, 6.283, 2.496] # franka hand offsets
@@ -37,11 +52,18 @@ record:
       # channel_signs: [-1, -1, 1, 1, 1, 1] # mirror
     unityvr_config:
       use_gripper: *use_gripper
-      pose_scaler: [3.0, 2.0]  # [position, attitude] 与 oculus 同档起步
+      # 全局[位置, 姿态]标量; 每轴微调用 pos/rot_axis_gain（勿同时大幅调两者避混淆）
+      pose_scaler: [3.0, 2.0]
       channel_signs: [1, 1, 1, -1, -1, 1]  # [x,y,z,rx,ry,rz]
       oc2base_path: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy"  # 整合后路径(验通固定映射实际所在; 与代码默认一致)
       robot_ip: "127.0.0.1"
       robot_port: 4242
+      # §11.3 位置每轴增益[x,y,z]; 叠加在 pose_scaler[0] 之上, 仅缩放灵敏度不改方向/手性(§10.2(0) 红线)
+      # 默认全1=等价历史 pose_scaler 行为; 用户反馈 Y好X/Z钝→调大 gx,gz（如 [2.0,1.0,2.0]）
+      pos_axis_gain: [1.0, 1.0, 1.0]
+      # §11.3 姿态每轴增益[rx,ry,rz]; 叠加在 pose_scaler[1] 之上, 不改方向/手性(§10.2(0) 红线)
+      # 默认全1=等价历史 pose_scaler 行为; 某轴旋转钝→调大对应增益
+      rot_axis_gain: [1.0, 1.0, 1.0]
     placo:
       visualize_placo: False
       placo_dt: 0.01
@@ -63,7 +85,7 @@ record:
       ik_ori_weight: 3.0            # 末端姿态跟踪权重（建议 0.3~2.0）
       ik_joints_weight: 0.2         # 关节锚定权重，解决 7-DOF 冗余（建议 0.1~1.0）
       ik_regularization: 1.0e-4     # 正则化权重，防止数值奇异（一般不调）
-      
+
   robot:
     # ip: &ip "172.16.0.2" # robot ip
     ip: &ip "127.0.0.1" # NUC ip
@@ -82,29 +104,28 @@ record:
     push_to_hub: False  # 禁用模型推送
     # pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/lihao-test-0310/diffusion_test1/checkpoints/last/pretrained_model"
     pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/zhonghuai/lajiao_20260318_merged/act_test2/checkpoints/last/pretrained_model"
-    # pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/lihao-test/act_test3/checkpoints/020000/pretrained_model"  
+    # pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/lihao-test/act_test3/checkpoints/020000/pretrained_model"
     # 预训练模型路径下要包括config.json
 
   task:
     # description: "Pick up the green cube and put it into the trash bin." # task description
-    description: "pick up the Shanghai Green and put them into the brown basket" # task description
-    # description: "pick up the red chili and put it into the brown basket" # task description
+    description: "pick up the Shanghai Green and put them into the brown basket" # hdf5 入口现读此 cfg（CLI 仅覆盖）
     # description: "pick up the red chili and put it into the brown basket"
-    num_episodes: 10 # number of episodes to record
+    num_episodes: 10 # 录制 episode 数; hdf5 入口现读此 cfg（CLI --episodes 仅临时覆盖）
     display: True # Whether to display the data during recording
     resume: false # whether to resume from an existing dataset
     resume_dataset: roboticiq/pick_all_yellow_cube_to_brown_basket_20260208_v01 # dataset to resume from if resume is True
-  
+
   time:
-    episode_time_sec: 6000 # max time per episode in seconds
+    episode_time_sec: 6000 # 每 episode 最长时间（秒）; hdf5 入口现读此 cfg（CLI --episode-sec 仅临时覆盖）
     reset_time_sec: 6000 # max time to reset between episodes in seconds
     save_meta_period: 1 # Save metadata after every N episodes
 
   cameras:
-    wrist_cam_serial: "419622073931" # wrist camera serial number 243222071212 344322074412
-    exterior_cam_serial: "420122071361" # exterior camera serial number 243322071821 339322074423
-    width: 424 # 640 424
-    height: 240 # 360 240
+    wrist_cam_serial: "419622073931" # 腕部相机序列号（手腕视角，跟随末端运动）; 参考: 243222071212 344322074412
+    exterior_cam_serial: "420122071361" # 外部相机序列号（全局视角，固定安装）; 参考: 243322071821 339322074423
+    width: 424 # 图像宽度（像素）; RealSense 支持 424/640
+    height: 240 # 图像高度（像素）; RealSense 支持 240/360
 
   storage:
     push_to_hub: False # whether to push the dataset to your huggingface repo after recording
@@ -115,12 +136,8 @@ replay:
   robot:
     ip: *ip
     # gripper_port: *gripper_port
-  control_mode: *control_mode 
+  control_mode: *control_mode
 
 visualize:
   dataset_name: babycare/milk_power_20260321_v03
   episode_index: 0 # episode index to visualize
-
-
-
-
