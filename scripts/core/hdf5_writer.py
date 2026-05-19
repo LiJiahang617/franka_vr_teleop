@@ -20,7 +20,7 @@ _VLEN_BYTES = h5py.special_dtype(vlen=np.dtype("uint8"))
 
 def write_episode(path, frames, *, task_name, target_fps, oc2base_R, quality,
                   vr_source, cam_names):
-    """把一条 episode 的帧列表写入 HDF5 文件并验证合规性。
+    """模块级落盘函数（不依赖 writer 实例状态；有文件写入 + validate_episode 副作用，会写 path 并在不合规时抛 RuntimeError）。
 
     参数说明（中文）：
         path: 输出 .h5 文件路径（字符串）。
@@ -33,6 +33,13 @@ def write_episode(path, frames, *, task_name, target_fps, oc2base_R, quality,
         quality: 质量参数字典（dict），JSON 序列化写入。
         vr_source: VR 来源标识（字符串）。
         cam_names: 相机名列表（list[str]）。
+
+    调用期间调用方不得修改 frames 及其帧内对象；异步路径由 Task3 调用方在 buffer 复用前
+    deepcopy 隔离保证。
+
+    task_name/target_fps/oc2base_R/quality/vr_source/cam_names 在函数内做
+    str/float/np.asarray/dict/list 规范化；HDF5EpisodeWriter.close() 传入的已是
+    __init__ 规范化后的值，再次转换为幂等无副作用。
 
     可安全在后台线程中调用（含末尾 validate_episode）。
     """
