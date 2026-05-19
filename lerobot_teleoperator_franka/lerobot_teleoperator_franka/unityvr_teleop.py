@@ -40,6 +40,8 @@ class UnityVRTeleop(BaseTeleop):
             use_gripper=self.cfg.use_gripper,
             robot_ip=self.cfg.robot_ip,
             robot_port=self.cfg.robot_port,
+            pos_axis_gain=self.cfg.pos_axis_gain,   # §11.3 per-axis 位置增益透传
+            rot_axis_gain=self.cfg.rot_axis_gain,   # §11.3 per-axis 旋转增益透传
         )
         logger.info("[TELEOP] UnityVR connected (world-frame, head-independent)")
 

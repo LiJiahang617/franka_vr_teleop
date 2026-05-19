@@ -64,6 +64,10 @@ class UnityVRTeleopConfig(BaseTeleopConfig):
     oc2base_path: str = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy"
     robot_ip: str = "127.0.0.1"
     robot_port: int = 4242
+    # §11.3 每轴运动灵敏度（默认全1=等价历史 pose_scaler 两标量行为，无新键时零改动）
+    # 仅在已验通映射方向输出后逐轴缩放，不改 _POS_MAP/R_cal 方向/手性（§10.2(0) 红线）
+    pos_axis_gain: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])  # [gx, gy, gz]
+    rot_axis_gain: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])  # [grx, gry, grz]
 
 
 # Legacy compatibility: FrankaTeleopConfig maps to DynamixelTeleopConfig

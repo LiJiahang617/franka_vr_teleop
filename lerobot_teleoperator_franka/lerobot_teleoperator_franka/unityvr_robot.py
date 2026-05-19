@@ -16,7 +16,21 @@ DOF = 7
 class UnityVRRobot:
     def __init__(self, oc2base_path="/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy",
                  pose_scaler=(1.0, 1.0), channel_signs=(1, 1, 1, 1, 1, 1),
-                 use_gripper=True, robot_ip="127.0.0.1", robot_port=4242):
+                 use_gripper=True, robot_ip="127.0.0.1", robot_port=4242,
+                 pos_axis_gain=(1., 1., 1.), rot_axis_gain=(1., 1., 1.)):
+        """初始化 UnityVRRobot。
+
+        Args:
+            oc2base_path: vr_align 标定 R 文件路径。
+            pose_scaler: [pos_scale, ori_scale] 全局标量增益。
+            channel_signs: 长 6 的 ±1，各轴方向符号。
+            use_gripper: 是否启用夹爪切换逻辑。
+            robot_ip: Franka zerorpc 服务 IP。
+            robot_port: Franka zerorpc 服务端口。
+            pos_axis_gain: §11.3 每轴位置增益 [gx, gy, gz]，默认 (1,1,1)=历史行为。
+                仅在已验通映射方向输出后逐轴缩放，不改方向/手性（§10.2(0) 红线）。
+            rot_axis_gain: §11.3 每轴旋转增益 [grx, gry, grz]，默认 (1,1,1)=历史行为。
+        """
         loaded = vr_align.load_rotation(oc2base_path)
         if loaded is None:
             raise RuntimeError(
@@ -27,6 +41,8 @@ class UnityVRRobot:
         self._reader = UnityVRReader()
         self._pose_scaler = list(pose_scaler)
         self._channel_signs = list(channel_signs)
+        self._pos_axis_gain = list(pos_axis_gain)    # §11.3 per-axis 位置增益
+        self._rot_axis_gain = list(rot_axis_gain)    # §11.3 per-axis 旋转增益
         self._use_gripper = use_gripper
         self._prev_T = None
         self._gripper_closed = False
@@ -55,7 +71,9 @@ class UnityVRRobot:
             if self._prev_T is not None:
                 delta = _m.compute_delta_action(
                     cur_T, self._prev_T, self._R,
-                    self._pose_scaler, self._channel_signs)
+                    self._pose_scaler, self._channel_signs,
+                    pos_axis_gain=self._pos_axis_gain,   # §11.3 per-axis 位置增益透传
+                    rot_axis_gain=self._rot_axis_gain)   # §11.3 per-axis 旋转增益透传
             self._prev_T = np.asarray(cur_T, float).copy()
         else:
             self._prev_T = None  # 松开/无效→丢锚, 防跳变
