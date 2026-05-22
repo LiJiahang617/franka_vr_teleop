@@ -35,8 +35,6 @@ setup(
             "tools-check-dataset = scripts.tools.check_dataset_info:main",
             "tools-check-rs = scripts.tools.rs_devices:main",
 
-            # test commands (testing scripts)
-            "test-gripper-ctrl = scripts.test.gripper_ctrl:main",
             # unified help command
             "franka-help = scripts.help.help_info:main",
         ]
