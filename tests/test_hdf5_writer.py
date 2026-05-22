@@ -6,8 +6,18 @@ from core.hdf5_writer import HDF5EpisodeWriter
 
 
 def _frame(i):
+    """生成 v2 格式测试帧（含各模态独立时间戳 + stale 字段）。"""
+    ts = 1.0 + i * 0.033
     return dict(
-        ts=1.0 + i * 0.033,
+        ts=ts,
+        # v2 独立时间戳（各模态略微偏移，模拟真实采集）
+        arm_ts=ts + 0.001,
+        effector_ts=ts + 0.001,
+        cam_ts={"wrist": ts + 0.003},
+        cam_hw_ts={"wrist": ts + 0.003},  # Task 8 实填真硬件戳；此处软件戳占位
+        arm_stale=False,
+        effector_stale=False,
+        cam_stale={"wrist": False},
         joints=np.zeros(7), joint_vel=np.zeros(7),
         ee_pose=np.array([0.1, 0, 0.3, 0, 0, 0], float),
         gripper_m=0.04, gripper_norm=0.5, gripper_cmd=0.0,
@@ -29,9 +39,17 @@ def test_writer_produces_conformant_episode(tmp_path):
         assert f["observations/arm/joints"].shape == (5, 7)
         assert f["action/delta_ee_pose"].shape == (5, 6)
         assert f["observations/effector/position"].shape == (5, 1)
-        # 240Hz 占位: 合法空数组
+        # v2: 各模态独立时间戳
+        assert f["observations/arm/timestamp"].shape == (5,)
+        assert f["observations/arm/stale"].shape == (5,)
+        assert f["observations/camera/rgb/wrist/hw_timestamp"].shape == (5,)
+        assert f["observations/camera/rgb/wrist/stale"].shape == (5,)
+        # state_hifreq 占位 M=0，wrench 字段存在
         assert f["observations/state_hifreq/joints"].shape == (0, 7)
+        assert f["observations/state_hifreq/wrench"].shape == (0, 6)
         assert f["infos/calibration/oc2base_R"].shape == (3, 3)
+        # v2: 无共用 observations/timestamp
+        assert "observations/timestamp" not in f
 
 
 def test_writer_rejects_empty_episode(tmp_path):

@@ -160,6 +160,8 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
         list[dict]：采集的帧列表，每帧含 ts/joints/joint_vel/ee_pose/
                     gripper_m/gripper_norm/gripper_cmd/delta_ee_pose/cams；
                     cams[cn] 已是 JPEG 编码后的 uint8 bytes。
+                    v2 扩展字段：arm_ts/effector_ts/cam_ts/cam_hw_ts/
+                    arm_stale/effector_stale/cam_stale（各模态独立时间戳与 stale 标志）。
     """
     buf = []
     period = 1.0 / fps
@@ -205,8 +207,13 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
             dtype=np.float64,
         )
 
+        # v2：arm/effector 独立时间戳（采集完 obs 后立即打戳，串行采集时差极小）
+        arm_ts = time.monotonic()
+        effector_ts = arm_ts  # 串行采集：arm/effector 在同一 get_observation 调用中读取
+
         # 相机图像：编码为 jpeg bytes（编码在 deepcopy 前，满足 deepcopy 时序要求）
         cams = {}
+        cam_ts = {}   # v2：各相机独立软件戳
         for cn in cam_names:
             img = obs.get(cn)
             if img is not None and isinstance(img, np.ndarray):
@@ -217,9 +224,21 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
             else:
                 # 占位（相机未就绪时）
                 cams[cn] = np.zeros((4,), np.uint8)
+            # 图像处理后打相机软件戳（Task 8 实填真硬件戳）
+            cam_ts[cn] = time.monotonic()
 
+        ts_now = time.monotonic()
         buf.append(dict(
-            ts=time.monotonic(),
+            ts=ts_now,
+            # v2 各模态独立时间戳字段
+            arm_ts=arm_ts,
+            effector_ts=effector_ts,
+            cam_ts=cam_ts,
+            cam_hw_ts={cn: cam_ts[cn] for cn in cam_names},  # Task 8 实填真硬件戳；此处软件戳占位
+            # v2 stale 字段（串行采集无 stale，全 False；Task 7/8 接入并行采集后可能非零）
+            arm_stale=False,
+            effector_stale=False,
+            cam_stale={cn: False for cn in cam_names},
             joints=joints,
             joint_vel=joint_vel,
             ee_pose=ee_pose,
