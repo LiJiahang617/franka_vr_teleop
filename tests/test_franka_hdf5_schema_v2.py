@@ -9,9 +9,13 @@
   - hw_timestamp 必须存在，shape 和 dtype 校验
   - stale 字段必须存在且 bool dtype
   - arm/effector/camera/action 各自独立 timestamp(N,) 必须校验
-  - camera 无相机时通过（空 rgb group）
+  - camera 无相机时被拒（Route B 必须有相机）
   - state_hifreq wrench(M,6) 字段预留（Task 7 实填）：M=0 时通过
   - validate_episode 返回 [] 代表合格，否则 violations 列表
+  - [Codex 审查补充] action/timestamp 二维被拒
+  - [Codex 审查补充] 时间戳单调性（action 严格递增，arm/eff/cam 非递减，hifreq 严格递增）
+  - [Codex 审查补充] images 长度与 N 不符被拒
+  - [Codex 审查补充] malformed rgb_group/tac_group（非 Group 类型）被拒
 """
 import h5py
 import numpy as np
@@ -35,6 +39,7 @@ def _write_v2(path, N=5, M=40, cam_names=("wrist",), include_depth=False,
         include_depth: 是否写入可扩展 depth 字段
         include_tactile: 是否写入可扩展 tactile 字段
     """
+    # 时间戳严格递增，满足新的单调性校验契约
     ts_arm = np.arange(N, dtype=np.float64) * 0.033 + 1.0
     ts_eff = ts_arm + 0.001
     ts_act = ts_arm + 0.002
@@ -83,18 +88,21 @@ def _write_v2(path, N=5, M=40, cam_names=("wrist",), include_depth=False,
             dummy_jpeg = bytes([0xFF, 0xD8, 0xFF, 0xD9])  # 最小合法 JPEG 头尾
             for i in range(N):
                 imgs[i] = np.frombuffer(dummy_jpeg, np.uint8)
-            ts_cam = np.arange(N, dtype=np.float64) * 0.033 + 1.0005 + 0.001 * cam_names.index(cn)
+            # 严格递增时间戳（满足单调性契约）
+            ts_cam = np.arange(N, dtype=np.float64) * 0.033 + 1.0005 + 0.001 * list(cam_names).index(cn)
             cg.create_dataset("timestamp", data=ts_cam)
             cg.create_dataset("stale", data=np.zeros(N, dtype=bool))
             cg.create_dataset("hw_timestamp", data=ts_cam * 1000.0)  # 毫秒 float64
 
         # observations/state_hifreq
         hf = obs.create_group("state_hifreq")
+        # 严格递增时间戳（满足单调性契约）
+        ts_hifreq = np.arange(M, dtype=np.float64) * (1.0 / 240.0)
         hf.create_dataset("joints", data=np.zeros((M, 7), np.float64))
         hf.create_dataset("joint_vel", data=np.zeros((M, 7), np.float64))
         hf.create_dataset("pose", data=np.zeros((M, 6), np.float64))
-        hf.create_dataset("timestamp", data=np.arange(M, dtype=np.float64))
-        hf.create_dataset("poly_ts", data=np.arange(M, dtype=np.float64))
+        hf.create_dataset("timestamp", data=ts_hifreq)
+        hf.create_dataset("poly_ts", data=ts_hifreq)
         hf.create_dataset("wrench", data=np.zeros((M, 6), np.float64))
 
         # action
@@ -144,13 +152,6 @@ def test_conformant_v2_empty_hifreq_passes(tmp_path):
     """M=0 state_hifreq 通过（spike 降级路径）。"""
     p = str(tmp_path / "ep.h5")
     _write_v2(p, N=5, M=0, cam_names=("wrist",))
-    assert S.validate_episode(p) == []
-
-
-def test_conformant_v2_no_cam_passes(tmp_path):
-    """无相机（空 rgb group）通过。"""
-    p = str(tmp_path / "ep.h5")
-    _write_v2(p, N=5, M=10, cam_names=())
     assert S.validate_episode(p) == []
 
 
@@ -209,6 +210,184 @@ def test_rejects_v1_shared_timestamp(tmp_path):
     # v2 validator 不检查 observations/timestamp，忽略遗留字段不报 violation
     v = S.validate_episode(p)
     assert v == []  # 合规 v2 + 遗留字段也通过
+
+
+# ---------------------------------------------------------------------------
+# [Codex 审查] action/timestamp 二维被拒
+# ---------------------------------------------------------------------------
+
+def test_rejects_action_timestamp_2d(tmp_path):
+    """action/timestamp 是 (N,1) 二维（v1 风格）必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5)
+    with h5py.File(p, "a") as f:
+        ts = f["action/timestamp"][...]
+        del f["action/timestamp"]
+        f["action"].create_dataset("timestamp", data=ts.reshape(5, 1))
+    v = S.validate_episode(p)
+    assert any("action/timestamp" in x and ("一维" in x or "shape" in x) for x in v)
+
+
+# ---------------------------------------------------------------------------
+# [Codex 审查] 时间戳单调性校验
+# ---------------------------------------------------------------------------
+
+def test_action_timestamp_not_strictly_increasing_rejected(tmp_path):
+    """action/timestamp 不严格递增（有相邻相等值）必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5)
+    with h5py.File(p, "a") as f:
+        ts = f["action/timestamp"][...].copy()
+        # 让 index 2 == index 3（相等但不严格递增）
+        ts[3] = ts[2]
+        del f["action/timestamp"]
+        f["action"].create_dataset("timestamp", data=ts)
+    v = S.validate_episode(p)
+    assert any("action/timestamp" in x and "递增" in x for x in v)
+
+
+def test_action_timestamp_decreasing_rejected(tmp_path):
+    """action/timestamp 倒退必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5)
+    with h5py.File(p, "a") as f:
+        ts = f["action/timestamp"][...].copy()
+        ts[2] = ts[4]  # 倒退
+        del f["action/timestamp"]
+        f["action"].create_dataset("timestamp", data=ts)
+    v = S.validate_episode(p)
+    assert any("action/timestamp" in x and "递增" in x for x in v)
+
+
+def test_arm_timestamp_equal_allowed_stale_nondec(tmp_path):
+    """arm/timestamp 相邻相等（stale 补帧）不应报 violation（非递减即可）。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5)
+    with h5py.File(p, "a") as f:
+        ts = f["observations/arm/timestamp"][...].copy()
+        # 让 index 1 == index 2（stale 补帧场景）
+        ts[2] = ts[1]
+        del f["observations/arm/timestamp"]
+        f["observations/arm"].create_dataset("timestamp", data=ts)
+    v = S.validate_episode(p)
+    assert not any("arm/timestamp" in x and "递" in x for x in v)
+
+
+def test_arm_timestamp_decreasing_rejected(tmp_path):
+    """arm/timestamp 倒退（非 stale，真时间错误）必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5)
+    with h5py.File(p, "a") as f:
+        ts = f["observations/arm/timestamp"][...].copy()
+        ts[2] = ts[0]  # 倒退
+        del f["observations/arm/timestamp"]
+        f["observations/arm"].create_dataset("timestamp", data=ts)
+    v = S.validate_episode(p)
+    assert any("observations/arm/timestamp" in x and "倒退" in x for x in v)
+
+
+def test_camera_timestamp_equal_allowed_stale_nondec(tmp_path):
+    """camera/timestamp 相邻相等（stale 补帧）不应报 violation。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5, cam_names=("wrist",))
+    with h5py.File(p, "a") as f:
+        ts = f["observations/camera/rgb/wrist/timestamp"][...].copy()
+        ts[3] = ts[2]  # stale 补帧
+        del f["observations/camera/rgb/wrist/timestamp"]
+        f["observations/camera/rgb/wrist"].create_dataset("timestamp", data=ts)
+    v = S.validate_episode(p)
+    assert not any("wrist/timestamp" in x and "递" in x for x in v)
+
+
+def test_camera_timestamp_decreasing_rejected(tmp_path):
+    """camera/timestamp 倒退必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5, cam_names=("wrist",))
+    with h5py.File(p, "a") as f:
+        ts = f["observations/camera/rgb/wrist/timestamp"][...].copy()
+        ts[3] = ts[0]  # 倒退
+        del f["observations/camera/rgb/wrist/timestamp"]
+        f["observations/camera/rgb/wrist"].create_dataset("timestamp", data=ts)
+    v = S.validate_episode(p)
+    assert any("wrist/timestamp" in x and "倒退" in x for x in v)
+
+
+def test_hifreq_timestamp_strictly_increasing_required(tmp_path):
+    """state_hifreq/timestamp 相邻相等（无 stale）必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5, M=10)
+    with h5py.File(p, "a") as f:
+        ts = f["observations/state_hifreq/timestamp"][...].copy()
+        ts[5] = ts[4]  # 相等，不严格递增
+        del f["observations/state_hifreq/timestamp"]
+        f["observations/state_hifreq"].create_dataset("timestamp", data=ts)
+    v = S.validate_episode(p)
+    assert any("state_hifreq/timestamp" in x and "递增" in x for x in v)
+
+
+def test_monotone_skip_when_n_lt_2(tmp_path):
+    """N=1 时不足两点，单调性校验跳过，合规 episode 通过。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=1, M=1)
+    assert S.validate_episode(p) == []
+
+
+# ---------------------------------------------------------------------------
+# [Codex 审查] 空 camera rgb group 被拒（Route B 必须有相机）
+# ---------------------------------------------------------------------------
+
+def test_rejects_empty_rgb_group(tmp_path):
+    """observations/camera/rgb 组存在但无相机子组必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5, M=10, cam_names=())  # cam_names=() → 空 rgb group
+    v = S.validate_episode(p)
+    assert any("rgb" in x and ("空" in x or "相机" in x) for x in v)
+
+
+def test_rejects_missing_rgb_group(tmp_path):
+    """observations/camera/rgb 组完全缺失必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5, M=10, cam_names=("wrist",))
+    with h5py.File(p, "a") as f:
+        del f["observations/camera/rgb"]
+    v = S.validate_episode(p)
+    assert any("rgb" in x for x in v)
+
+
+# ---------------------------------------------------------------------------
+# [Codex 审查] images 长度与 N 不符被拒
+# ---------------------------------------------------------------------------
+
+def test_rejects_images_length_mismatch(tmp_path):
+    """camera/{cn}/images shape[0] != N 必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5, cam_names=("wrist",))
+    with h5py.File(p, "a") as f:
+        del f["observations/camera/rgb/wrist/images"]
+        _VLEN = h5py.special_dtype(vlen=np.dtype("uint8"))
+        # 只写 3 帧，但 N=5
+        imgs = f["observations/camera/rgb/wrist"].create_dataset("images", (3,), dtype=_VLEN)
+        dummy = bytes([0xFF, 0xD8, 0xFF, 0xD9])
+        for i in range(3):
+            imgs[i] = np.frombuffer(dummy, np.uint8)
+    v = S.validate_episode(p)
+    assert any("images" in x and ("shape" in x or "!=" in x or "3" in x) for x in v)
+
+
+# ---------------------------------------------------------------------------
+# [Codex 审查] malformed group（非 Group 类型）被拒
+# ---------------------------------------------------------------------------
+
+def test_rejects_rgb_group_not_group(tmp_path):
+    """observations/camera/rgb 存在但是 Dataset 而非 Group 必须被拒。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=5, cam_names=("wrist",))
+    with h5py.File(p, "a") as f:
+        del f["observations/camera/rgb"]
+        # 写成一个 dataset 而非 group（malformed）
+        f["observations/camera"].create_dataset("rgb", data=np.zeros(5, np.float64))
+    v = S.validate_episode(p)
+    assert any("rgb" in x for x in v)
 
 
 # ---------------------------------------------------------------------------
