@@ -1,19 +1,21 @@
 """离线时间对齐转换器：以主相机图像时间戳为锚，把各模态重采到锚时间轴。
 
 用法（CLI）：
-    python align_offline.py --in ep.h5 --out aligned.h5 --on-stale interpolate
-    python align_offline.py --in ep.h5 --out aligned.h5 --on-stale drop
-    python align_offline.py --in ep.h5 --out aligned.h5 --on-stale keep --cam-anchor exterior
+    python align_offline.py --in ep.h5 --out aligned.npz --on-stale interpolate
+    python align_offline.py --in ep.h5 --out aligned.npz --on-stale drop
+    python align_offline.py --in ep.h5 --out aligned.npz --on-stale keep --cam-anchor exterior
 
 设计要点：
   - 以主相机（默认 cam_anchor=第一个相机）的 timestamp(N,) 为锚时间轴（N_anchor 个点）
   - arm/effector/action 各模态通过线性插值（np.interp）重采到锚轴
   - arm.pose 中的 EE 旋转（indices 3:6，欧拉角 rad）用 SLERP（球面线性插值）
-  - state_hifreq 用最近邻插值重采（高频 → 低频，取最近时间戳样本）
+  - state_hifreq 保留原 240Hz 时间轴与数据，不重采到图像锚轴
   - on_stale：对被标记为 stale 的锚帧的处理策略
       - "interpolate"：忽略 stale 标记，正常插值（默认）
       - "drop"：丢弃 stale 锚帧，返回数组长度 < N_anchor
-      - "keep"：原样保留 stale 帧（等同 interpolate，明确语义）
+      - "keep"：原样保留 stale 帧（keep 与 interpolate 对 state/action 对齐结果相同，
+                区别仅 keep 保留 stale 标记的语义意图）
+  - 外推行为：锚轴超出某模态时间范围时，np.interp 与 SLERP 均采用端点保持（hold）
 
 返回值（align_by_image_timestamp）：dict[str, np.ndarray]，键含：
   - "anchor_ts"            : (N_out,) 锚时间轴
@@ -44,25 +46,43 @@ from scipy.spatial.transform import Rotation, Slerp
 # 内部辅助
 # ---------------------------------------------------------------------------
 
-def _interp_1d(src_ts: np.ndarray, src_vals: np.ndarray, dst_ts: np.ndarray) -> np.ndarray:
-    """对一维 src_vals(N,) 做线性插值，映射到 dst_ts。
+def _dedup_strictly_increasing(
+    ts: np.ndarray, vals: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """对时间轴去重，保留重复时间戳中的最后一个样本（最新数据），返回严格递增序列。
+
+    schema v2 允许带 stale 的模态时间戳「非递增」——补帧复用上一帧戳时可能出现
+    重复时间戳。scipy Slerp 要求严格递增，np.interp 遇重复 xp 不报错但结果不可靠。
+    此 helper 统一规范化所有模态的源时间轴。
 
     Args:
-        src_ts: 源时间轴 (N,)
-        src_vals: 源数据 (N,)
-        dst_ts: 目标时间轴 (M,)
+        ts: 源时间轴 (N,)，允许非严格递增（含重复）
+        vals: 源数据 (N,) 或 (N, D)
 
     Returns:
-        插值结果 (M,)
+        (ts_unique, vals_unique)：严格递增的时间轴与对应数据
     """
-    return np.interp(dst_ts, src_ts, src_vals)
+    if len(ts) == 0:
+        return ts, vals
+
+    # 找每个时间戳值最后一次出现的原始索引：
+    # 对 ts 逆序做 np.unique（保留第一次出现即逆序最后），再映射回原始索引
+    ts_rev = ts[::-1]
+    _, first_in_rev = np.unique(ts_rev, return_index=True)
+    # 逆序索引 → 原始索引（最后一次出现）
+    last_appearance = len(ts) - 1 - first_in_rev
+    # 按原始时间顺序排序（保证严格递增）
+    last_appearance_sorted = np.sort(last_appearance)
+    ts_unique = ts[last_appearance_sorted]
+    vals_unique = vals[last_appearance_sorted]
+    return ts_unique, vals_unique
 
 
 def _interp_cols(src_ts: np.ndarray, src_vals: np.ndarray, dst_ts: np.ndarray) -> np.ndarray:
     """对多列 src_vals(N, D) 逐列线性插值。
 
     Args:
-        src_ts: 源时间轴 (N,)
+        src_ts: 源时间轴 (N,)，必须严格递增
         src_vals: 源数据 (N, D)
         dst_ts: 目标时间轴 (M,)
 
@@ -77,17 +97,19 @@ def _interp_cols(src_ts: np.ndarray, src_vals: np.ndarray, dst_ts: np.ndarray) -
 
 
 def _slerp_euler(src_ts: np.ndarray, euler_rad: np.ndarray, dst_ts: np.ndarray) -> np.ndarray:
-    """以 SLERP 对欧拉角（ZYX 顺序 rad）做球面线性插值。
+    """以 SLERP 对欧拉角（xyz 内旋 rad）做球面线性插值，输出欧拉角已 unwrap。
 
-    参数中欧拉角被转换为四元数，SLERP 后再转回欧拉角。
+    参数中欧拉角被转换为四元数，SLERP 后再转回欧拉角，最后逐列 np.unwrap 减少
+    分支切换处的数值跳变。SLERP 保证姿态球面连续，输出欧拉角已 unwrap，但接近
+    万向锁时欧拉表示仍可能有数值跳变（这是欧拉角固有局限）。
 
     Args:
-        src_ts: 源时间轴 (N,)
-        euler_rad: 源欧拉角 (N, 3)，顺序 [rx, ry, rz]（'xyz' 内旋，即欧拉角 XYZ 顺序）
+        src_ts: 源时间轴 (N,)，必须严格递增且 N >= 2
+        euler_rad: 源欧拉角 (N, 3)，顺序 [rx, ry, rz]（'xyz' 内旋）
         dst_ts: 目标时间轴 (M,)
 
     Returns:
-        SLERP 插值后的欧拉角 (M, 3)
+        SLERP 插值后的欧拉角 (M, 3)，已逐列 unwrap
     """
     # 转为 Rotation 对象（假设欧拉角编码为 xyz 内旋）
     rotations = Rotation.from_euler("xyz", euler_rad)
@@ -95,30 +117,69 @@ def _slerp_euler(src_ts: np.ndarray, euler_rad: np.ndarray, dst_ts: np.ndarray) 
     # 将 dst_ts 裁剪到 [src_ts[0], src_ts[-1]]，防止外推
     dst_ts_clamped = np.clip(dst_ts, src_ts[0], src_ts[-1])
     interped = slerp(dst_ts_clamped)
-    return interped.as_euler("xyz")
+    euler_out = interped.as_euler("xyz")
+    # 逐列 unwrap 减少万向锁附近的数值跳变
+    for col in range(euler_out.shape[1]):
+        euler_out[:, col] = np.unwrap(euler_out[:, col])
+    return euler_out
 
 
-def _nearest_neighbor(src_ts: np.ndarray, src_vals: np.ndarray, dst_ts: np.ndarray) -> np.ndarray:
-    """最近邻插值：对每个 dst_ts[i]，找 src_ts 中最近的索引。
+def _interp_modal(
+    modal_name: str,
+    src_ts: np.ndarray,
+    src_vals: np.ndarray,
+    dst_ts: np.ndarray,
+) -> np.ndarray:
+    """带 N<2 边界检查的多列线性插值。
 
     Args:
-        src_ts: 源时间轴 (N,)
-        src_vals: 源数据 (N,) 或 (N, D)
-        dst_ts: 目标时间轴 (M,)
+        modal_name: 模态名，用于错误信息
+        src_ts: 源时间轴（规范化后严格递增）
+        src_vals: 源数据 (N, D)
+        dst_ts: 目标时间轴
 
     Returns:
-        最近邻结果，shape 与 src_vals 的其余维度一致
+        插值或广播结果 (len(dst_ts), D)
+
+    Raises:
+        ValueError: src_ts 长度为 0 时抛出，错误信息包含 modal_name
     """
-    idx = np.searchsorted(src_ts, dst_ts)
-    idx = np.clip(idx, 0, len(src_ts) - 1)
-    # 比较 idx 和 idx-1，取更近的
-    idx_prev = np.clip(idx - 1, 0, len(src_ts) - 1)
-    dist_curr = np.abs(dst_ts - src_ts[idx])
-    dist_prev = np.abs(dst_ts - src_ts[idx_prev])
-    # 选较近的
-    use_prev = dist_prev < dist_curr
-    best_idx = np.where(use_prev, idx_prev, idx)
-    return src_vals[best_idx]
+    N = len(src_ts)
+    if N == 0:
+        raise ValueError(f"{modal_name} 模态规范化后无有效帧（0 帧），无法插值")
+    if N == 1:
+        # 单帧广播到全锚时间轴
+        return np.tile(src_vals[0], (len(dst_ts), 1))
+    return _interp_cols(src_ts, src_vals, dst_ts)
+
+
+def _slerp_modal(
+    modal_name: str,
+    src_ts: np.ndarray,
+    euler_rad: np.ndarray,
+    dst_ts: np.ndarray,
+) -> np.ndarray:
+    """带 N<2 边界检查的 SLERP 欧拉角插值。
+
+    Args:
+        modal_name: 模态名，用于错误信息
+        src_ts: 源时间轴（规范化后严格递增）
+        euler_rad: 源欧拉角 (N, 3)
+        dst_ts: 目标时间轴
+
+    Returns:
+        插值或广播结果 (len(dst_ts), 3)
+
+    Raises:
+        ValueError: src_ts 长度为 0 时抛出，错误信息包含 modal_name
+    """
+    N = len(src_ts)
+    if N == 0:
+        raise ValueError(f"{modal_name} 模态规范化后无有效帧（0 帧），无法插值")
+    if N == 1:
+        # 单旋转广播到全锚时间轴
+        return np.tile(euler_rad[0], (len(dst_ts), 1))
+    return _slerp_euler(src_ts, euler_rad, dst_ts)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +195,9 @@ def align_by_image_timestamp(
 
     Args:
         h5_path: v2 hdf5 路径
-        on_stale: stale 帧处理策略（"interpolate" | "drop" | "keep"）
+        on_stale: stale 帧处理策略（"interpolate" | "drop" | "keep"）。
+            keep 与 interpolate 对 state/action 对齐结果相同，区别仅 keep 保留 stale
+            标记的语义意图。
         cam_anchor: 锚相机名（None 表示取第一个相机按字典序）
 
     Returns:
@@ -194,24 +257,36 @@ def align_by_image_timestamp(
     if len(anchor_ts_use) == 0:
         raise ValueError("锚时间轴在 on_stale='drop' 后为空（所有帧都是 stale）")
 
-    # --- 各模态插值到锚时间轴 ---
+    # --- 规范化各模态源时间轴（去除重复时间戳，保留最后一个样本） ---
+    # schema v2 stale 补帧可能产生重复时间戳，scipy Slerp 要求严格递增
+    arm_ts_u, arm_joints_u = _dedup_strictly_increasing(arm_ts, arm_joints)
+    arm_ts_u2, arm_joint_vel_u = _dedup_strictly_increasing(arm_ts, arm_joint_vel)
+    arm_ts_u3, arm_pose_u = _dedup_strictly_increasing(arm_ts, arm_pose)
+
+    eff_ts_u, gripper_pos_u = _dedup_strictly_increasing(eff_ts, gripper_pos)
+    eff_ts_u2, gripper_norm_u = _dedup_strictly_increasing(eff_ts, gripper_norm)
+
+    act_ts_u, act_delta_ee_u = _dedup_strictly_increasing(act_ts, act_delta_ee)
+    act_ts_u2, act_gripper_cmd_u = _dedup_strictly_increasing(act_ts, act_gripper_cmd)
+
+    # --- 各模态插值到锚时间轴（带 N<2 边界处理） ---
 
     # arm：pos 线性插值，rot SLERP
-    interp_joints = _interp_cols(arm_ts, arm_joints, anchor_ts_use)
-    interp_joint_vel = _interp_cols(arm_ts, arm_joint_vel, anchor_ts_use)
+    interp_joints = _interp_modal("arm", arm_ts_u, arm_joints_u, anchor_ts_use)
+    interp_joint_vel = _interp_modal("arm", arm_ts_u2, arm_joint_vel_u, anchor_ts_use)
 
     # arm_pose：前 3 列（位置）线性，后 3 列（欧拉角）SLERP
-    interp_pos = _interp_cols(arm_ts, arm_pose[:, :3], anchor_ts_use)
-    interp_euler = _slerp_euler(arm_ts, arm_pose[:, 3:], anchor_ts_use)
+    interp_pos = _interp_modal("arm", arm_ts_u3, arm_pose_u[:, :3], anchor_ts_use)
+    interp_euler = _slerp_modal("arm", arm_ts_u3, arm_pose_u[:, 3:], anchor_ts_use)
     interp_pose = np.concatenate([interp_pos, interp_euler], axis=1)
 
     # effector：线性插值
-    interp_gripper_pos = _interp_cols(eff_ts, gripper_pos, anchor_ts_use)
-    interp_gripper_norm = _interp_cols(eff_ts, gripper_norm, anchor_ts_use)
+    interp_gripper_pos = _interp_modal("effector", eff_ts_u, gripper_pos_u, anchor_ts_use)
+    interp_gripper_norm = _interp_modal("effector", eff_ts_u2, gripper_norm_u, anchor_ts_use)
 
     # action（delta_ee_pose + gripper_cmd）：线性插值
-    interp_delta_ee = _interp_cols(act_ts, act_delta_ee, anchor_ts_use)
-    interp_gripper_cmd = _interp_cols(act_ts, act_gripper_cmd, anchor_ts_use)
+    interp_delta_ee = _interp_modal("action", act_ts_u, act_delta_ee_u, anchor_ts_use)
+    interp_gripper_cmd = _interp_modal("action", act_ts_u2, act_gripper_cmd_u, anchor_ts_use)
 
     return {
         "anchor_ts": anchor_ts_use,
@@ -244,7 +319,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--on-stale",
         choices=["interpolate", "drop", "keep"],
         default="interpolate",
-        help="stale 帧处理策略（默认 interpolate）",
+        help=(
+            "stale 帧处理策略（默认 interpolate）。"
+            "keep 与 interpolate 对 state/action 对齐结果相同，区别仅 keep 保留 stale 标记的语义意图。"
+        ),
     )
     p.add_argument(
         "--cam-anchor",

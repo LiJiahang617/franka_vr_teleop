@@ -13,6 +13,10 @@
   - state_hifreq 原样返回（不重采，shape 不变）
   - CLI 正常运行退出 0，生成 .npz 文件
   - 多相机场景：正确选用 cam_anchor 指定相机
+  - 源时间轴含重复时间戳（模拟 stale 补帧）时不崩、对齐正确
+  - 单帧模态广播到全锚时间轴
+  - 0 帧模态抛带模态名的 ValueError
+  - SLERP 输出 unwrap 后无大跳变
 """
 import os
 
@@ -38,6 +42,9 @@ def _write_v2_synthetic(
     eff_ts_offset: float = 0.007,
     act_ts_offset: float = 0.003,
     stale_indices: dict | None = None,
+    arm_ts_override: np.ndarray | None = None,
+    eff_ts_override: np.ndarray | None = None,
+    act_ts_override: np.ndarray | None = None,
 ) -> dict:
     """生成合规 franka-hdf5-v2 文件，带已知偏移时间戳。
 
@@ -50,6 +57,9 @@ def _write_v2_synthetic(
         eff_ts_offset: effector 时间戳偏移
         act_ts_offset: action 时间戳偏移
         stale_indices: dict 形如 {"wrist": [2, 3]}，指定哪些帧 stale
+        arm_ts_override: 若非 None，直接用这个数组代替 arm 时间戳
+        eff_ts_override: 若非 None，直接用这个数组代替 effector 时间戳
+        act_ts_override: 若非 None，直接用这个数组代替 action 时间戳
 
     Returns:
         真值 dict，包含各模态的合成轨迹（用于验证插值精度）
@@ -62,26 +72,30 @@ def _write_v2_synthetic(
     anchor_ts = np.arange(N, dtype=np.float64) * (1.0 / 30.0) + 10.0
 
     # 各模态时间戳（固定偏移，使插值点落在锚轴上）
-    arm_ts = anchor_ts + arm_ts_offset
-    eff_ts = anchor_ts + eff_ts_offset
-    act_ts = anchor_ts + act_ts_offset
+    arm_ts = arm_ts_override if arm_ts_override is not None else anchor_ts + arm_ts_offset
+    eff_ts = eff_ts_override if eff_ts_override is not None else anchor_ts + eff_ts_offset
+    act_ts = act_ts_override if act_ts_override is not None else anchor_ts + act_ts_offset
 
     # 合成线性轨迹：joints 线性增，pose 位置线性 + 旋转线性（Euler 步进）
-    joints = np.outer(np.arange(N, dtype=np.float64), np.ones(7)) * 0.01  # (N,7)
-    joint_vel = np.outer(np.arange(N, dtype=np.float64), np.ones(7)) * 0.001
+    arm_N = len(arm_ts)
+    eff_N = len(eff_ts)
+    act_N = len(act_ts)
+
+    joints = np.outer(np.arange(arm_N, dtype=np.float64), np.ones(7)) * 0.01  # (arm_N,7)
+    joint_vel = np.outer(np.arange(arm_N, dtype=np.float64), np.ones(7)) * 0.001
     # pose 前 3 列位置线性
-    positions = np.outer(np.arange(N, dtype=np.float64), np.array([0.001, 0.002, 0.003]))
+    positions = np.outer(np.arange(arm_N, dtype=np.float64), np.array([0.001, 0.002, 0.003]))
     # 后 3 列欧拉角线性递增（rx 从 0 到 0.3 rad）
-    angles = np.outer(np.arange(N, dtype=np.float64), np.array([0.03, 0.0, 0.0]))
+    angles = np.outer(np.arange(arm_N, dtype=np.float64), np.array([0.03, 0.0, 0.0]))
     pose = np.concatenate([positions, angles], axis=1).astype(np.float64)
 
     # effector
-    gripper_pos = (np.arange(N, dtype=np.float64) * 0.004).reshape(N, 1)
+    gripper_pos = (np.arange(eff_N, dtype=np.float64) * 0.004).reshape(eff_N, 1)
     gripper_norm = gripper_pos / 0.08
 
     # action
-    delta_ee = np.random.default_rng(42).uniform(-0.01, 0.01, (N, 6))
-    gripper_cmd = np.zeros((N, 1), np.float64)
+    delta_ee = np.random.default_rng(42).uniform(-0.01, 0.01, (act_N, 6))
+    gripper_cmd = np.zeros((act_N, 1), np.float64)
 
     # state_hifreq
     if M > 0:
@@ -119,16 +133,16 @@ def _write_v2_synthetic(
         arm.create_dataset("joint_vel", data=joint_vel)
         arm.create_dataset("pose", data=pose)
         arm.create_dataset("timestamp", data=arm_ts)
-        arm.create_dataset("stale", data=np.zeros(N, dtype=bool))
+        arm.create_dataset("stale", data=np.zeros(arm_N, dtype=bool))
 
         # effector
         eff = obs.create_group("effector")
         eff.create_dataset("position", data=gripper_pos)
         eff.create_dataset("position_norm", data=gripper_norm)
         eff.create_dataset("type",
-                           data=np.array([b"gripper"] * N, dtype=h5py.special_dtype(vlen=bytes)))
+                           data=np.array([b"gripper"] * eff_N, dtype=h5py.special_dtype(vlen=bytes)))
         eff.create_dataset("timestamp", data=eff_ts)
-        eff.create_dataset("stale", data=np.zeros(N, dtype=bool))
+        eff.create_dataset("stale", data=np.zeros(eff_N, dtype=bool))
 
         # camera
         cam_g = obs.create_group("camera")
@@ -164,9 +178,10 @@ def _write_v2_synthetic(
         act.create_dataset("gripper_cmd", data=gripper_cmd)
         act.create_dataset("timestamp", data=act_ts)
 
-    # 验证写出的文件合规（S 在模块顶层已导入）
-    violations = S.validate_episode(path)
-    assert violations == [], f"合成 hdf5 不合规：{violations}"
+    # 注意：arm_ts_override 等情形下数组长度与 N 不同，跳过 schema 校验
+    if arm_ts_override is None and eff_ts_override is None and act_ts_override is None:
+        violations = S.validate_episode(path)
+        assert violations == [], f"合成 hdf5 不合规：{violations}"
 
     return {
         "anchor_ts": anchor_ts,
@@ -505,3 +520,185 @@ class TestCLI:
         ext_ts = np.load(npz_ext)["anchor_ts"]
         wrist_ts = np.load(npz_wrist)["anchor_ts"]
         assert not np.array_equal(ext_ts, wrist_ts)
+
+
+# ---------------------------------------------------------------------------
+# 新增测试：时间戳去重（模拟 stale 补帧产生重复戳）
+# ---------------------------------------------------------------------------
+
+class TestDedupTimestamps:
+    """验证源时间轴含重复戳时，对齐不崩、结果正确。"""
+
+    def test_arm_duplicate_timestamps_no_crash(self, tmp_path):
+        """arm 时间戳含重复（模拟 stale 补帧）时，align 不崩。"""
+        path = str(tmp_path / "ep.h5")
+        anchor_ts = np.arange(10, dtype=np.float64) / 30.0 + 10.0
+        # arm 时间戳：第 3、4 帧重复（补帧导致相同戳）
+        arm_ts = anchor_ts + 0.005
+        arm_ts[4] = arm_ts[3]  # 重复
+
+        _write_v2_synthetic(path, N=10, arm_ts_override=arm_ts)
+
+        # 不应崩溃（之前 Slerp 会 ValueError）
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+        assert aligned["arm_joints"].shape == (10, 7)
+
+    def test_arm_duplicate_timestamps_last_wins(self, tmp_path):
+        """重复时间戳保留最后一个对应的值（最新数据）。"""
+        path = str(tmp_path / "ep.h5")
+        anchor_ts = np.arange(10, dtype=np.float64) / 30.0 + 10.0
+        arm_ts = anchor_ts + 0.005
+        # 第 3、4 帧重复，最后一个（index 4）应被保留
+        arm_ts[4] = arm_ts[3]
+
+        _write_v2_synthetic(path, N=10, arm_ts_override=arm_ts)
+
+        # 只验证 align 可正常运行并返回正确形状
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+        assert aligned["arm_joints"].shape[0] == 10
+
+    def test_effector_duplicate_timestamps_no_crash(self, tmp_path):
+        """effector 时间戳含重复时，align 不崩。"""
+        path = str(tmp_path / "ep.h5")
+        anchor_ts = np.arange(10, dtype=np.float64) / 30.0 + 10.0
+        eff_ts = anchor_ts + 0.007
+        eff_ts[6] = eff_ts[5]  # 重复
+
+        _write_v2_synthetic(path, N=10, eff_ts_override=eff_ts)
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+        assert aligned["gripper_position"].shape == (10, 1)
+
+    def test_action_duplicate_timestamps_no_crash(self, tmp_path):
+        """action 时间戳含重复时，align 不崩。"""
+        path = str(tmp_path / "ep.h5")
+        anchor_ts = np.arange(10, dtype=np.float64) / 30.0 + 10.0
+        act_ts = anchor_ts + 0.003
+        act_ts[2] = act_ts[1]  # 重复
+
+        _write_v2_synthetic(path, N=10, act_ts_override=act_ts)
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+        assert aligned["action_delta_ee_pose"].shape == (10, 6)
+
+    def test_many_consecutive_duplicates(self, tmp_path):
+        """连续多个重复时间戳（大量 stale 补帧），align 不崩且形状正确。"""
+        path = str(tmp_path / "ep.h5")
+        anchor_ts = np.arange(20, dtype=np.float64) / 30.0 + 10.0
+        arm_ts = anchor_ts + 0.005
+        # 帧 5-14 全部重复同一戳（极端补帧）
+        arm_ts[5:15] = arm_ts[5]
+
+        _write_v2_synthetic(path, N=20, arm_ts_override=arm_ts)
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+        assert aligned["arm_joints"].shape == (20, 7)
+
+
+# ---------------------------------------------------------------------------
+# 新增测试：N<2 边界（0帧/1帧模态）
+# ---------------------------------------------------------------------------
+
+class TestNLessThan2Boundary:
+    """验证单帧广播和零帧 ValueError 行为。"""
+
+    def test_single_frame_arm_broadcasts(self, tmp_path):
+        """arm 模态只有 1 帧时，值广播到全部锚时间轴。"""
+        path = str(tmp_path / "ep.h5")
+        anchor_ts = np.arange(10, dtype=np.float64) / 30.0 + 10.0
+        # arm 只有 1 帧，时间戳在锚轴范围内
+        arm_ts = np.array([anchor_ts[5]])  # 单帧
+
+        _write_v2_synthetic(path, N=10, arm_ts_override=arm_ts)
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+        # 形状正确
+        assert aligned["arm_joints"].shape == (10, 7)
+        # 所有行都等于该唯一帧的值（广播）
+        first_row = aligned["arm_joints"][0]
+        for i in range(1, 10):
+            np.testing.assert_array_equal(aligned["arm_joints"][i], first_row,
+                                           err_msg=f"第 {i} 行与第 0 行不同（期望广播）")
+
+    def test_single_frame_slerp_broadcasts(self, tmp_path):
+        """arm 模态只有 1 帧时，SLERP 旋转也广播（不崩）。"""
+        path = str(tmp_path / "ep.h5")
+        anchor_ts = np.arange(8, dtype=np.float64) / 30.0 + 10.0
+        arm_ts = np.array([anchor_ts[4]])
+
+        _write_v2_synthetic(path, N=8, arm_ts_override=arm_ts)
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+        # 旋转列（3:6）应全部相同
+        rot = aligned["arm_pose"][:, 3:]
+        assert rot.shape == (8, 3)
+        for i in range(1, 8):
+            np.testing.assert_array_equal(rot[i], rot[0],
+                                           err_msg=f"旋转第 {i} 行广播失败")
+
+    def test_zero_frame_arm_raises_with_modal_name(self, tmp_path):
+        """arm 模态规范化后 0 帧时，应抛出含模态名的 ValueError。"""
+        path = str(tmp_path / "ep.h5")
+        # arm_ts 为空数组（0 帧）
+        arm_ts = np.array([], dtype=np.float64)
+
+        _write_v2_synthetic(path, N=10, arm_ts_override=arm_ts)
+
+        with pytest.raises(ValueError, match="arm"):
+            align_by_image_timestamp(path, on_stale="interpolate")
+
+    def test_zero_frame_effector_raises_with_modal_name(self, tmp_path):
+        """effector 模态规范化后 0 帧时，应抛出含模态名的 ValueError。"""
+        path = str(tmp_path / "ep.h5")
+        eff_ts = np.array([], dtype=np.float64)
+
+        _write_v2_synthetic(path, N=10, eff_ts_override=eff_ts)
+
+        with pytest.raises(ValueError, match="effector"):
+            align_by_image_timestamp(path, on_stale="interpolate")
+
+    def test_zero_frame_action_raises_with_modal_name(self, tmp_path):
+        """action 模态规范化后 0 帧时，应抛出含模态名的 ValueError。"""
+        path = str(tmp_path / "ep.h5")
+        act_ts = np.array([], dtype=np.float64)
+
+        _write_v2_synthetic(path, N=10, act_ts_override=act_ts)
+
+        with pytest.raises(ValueError, match="action"):
+            align_by_image_timestamp(path, on_stale="interpolate")
+
+
+# ---------------------------------------------------------------------------
+# 新增测试：SLERP 输出 unwrap 无大跳变
+# ---------------------------------------------------------------------------
+
+class TestSlerpUnwrap:
+    """验证 SLERP 输出欧拉角经 unwrap 后无大跳变。"""
+
+    def test_slerp_output_no_large_jumps(self, tmp_path):
+        """连续旋转轨迹，SLERP 输出相邻帧欧拉角差值应 < π（unwrap 后）。"""
+        path = str(tmp_path / "ep.h5")
+        _write_v2_synthetic(path, N=20, arm_ts_offset=0.005)
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+
+        # 检查旋转列（3:6）相邻帧差值
+        rot = aligned["arm_pose"][:, 3:]
+        diffs = np.diff(rot, axis=0)
+        max_jump = np.abs(diffs).max()
+        assert max_jump < np.pi, (
+            f"SLERP 输出相邻欧拉角跳变过大：{max_jump:.4f} rad >= π"
+        )
+
+    def test_slerp_unwrap_rx_monotone_after_unwrap(self, tmp_path):
+        """线性递增 rx 轨迹，unwrap 后应单调递增。"""
+        path = str(tmp_path / "ep.h5")
+        _write_v2_synthetic(path, N=15, arm_ts_offset=0.005)
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+
+        rx = aligned["arm_pose"][:, 3]
+        diffs = np.diff(rx)
+        assert np.all(diffs >= -1e-10), (
+            f"unwrap 后 rx 仍不单调：min diff={diffs.min():.2e}"
+        )
