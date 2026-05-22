@@ -787,3 +787,83 @@ class TestAnchorIndices:
         aligned = align_by_image_timestamp(path, on_stale="interpolate")
 
         assert "anchor_indices" in aligned
+
+
+# ---------------------------------------------------------------------------
+# 新增单元测试：_select_anchor_ts 量级/映射/fallback（Bug1 修复，Task 8）
+# ---------------------------------------------------------------------------
+
+class TestSelectAnchorTs:
+    """直接测试 _select_anchor_ts 的核心行为（不造 hdf5，速度快）。"""
+
+    @staticmethod
+    def _fn():
+        from tools.align_offline import _select_anchor_ts
+        return _select_anchor_ts
+
+    def test_hw_valid_returns_second_scale_not_ms(self):
+        """hw 达标时返回值在秒量级（不是毫秒 ~1e6 量级）。"""
+        fn = self._fn()
+        sw_ts = np.linspace(100.0, 100.633, 20)
+        hw_ts = sw_ts * 1000.0 + 5_000_000.0   # 完美线性，量级 ~5e6 ms
+        anchor = fn(sw_ts, hw_ts)
+        # 修复前：anchor[0] ≈ 5e6；修复后：anchor[0] ≈ 100（秒）
+        assert anchor[0] < 1000.0, (
+            f"anchor[0]={anchor[0]:.2e} 仍是毫秒量级（Bug 未修复）"
+        )
+
+    def test_hw_valid_perfect_linear_anchor_equals_sw_ts(self):
+        """完美线性 hw_ts：逆变换后 anchor 应与 sw_ts 误差 < 1e-9s。"""
+        fn = self._fn()
+        sw_ts = np.linspace(50.0, 51.0, 30)
+        hw_ts = sw_ts * 1000.0 + 9_876_543.0   # slope=1000，R²=1.0
+        anchor = fn(sw_ts, hw_ts)
+        np.testing.assert_allclose(anchor, sw_ts, atol=1e-9,
+                                   err_msg="完美线性 hw_ts 逆变换后误差应 < 1e-9s")
+
+    def test_hw_valid_anchor_within_arm_ts_range(self):
+        """hw 达标时 anchor 范围与 arm_ts 重叠（不再全端点外推）。"""
+        fn = self._fn()
+        sw_ts = np.linspace(10.0, 10.5, 15)
+        hw_ts = sw_ts * 1000.0 + 1e8
+        arm_ts = sw_ts + 0.005
+        anchor = fn(sw_ts, hw_ts)
+        in_range = np.sum((anchor >= arm_ts[0]) & (anchor <= arm_ts[-1]))
+        assert in_range > 0, (
+            f"anchor 完全超出 arm_ts 范围（全端点外推）。"
+            f"anchor={anchor[[0,-1]]}，arm_ts={arm_ts[[0,-1]]}"
+        )
+
+    def test_hw_none_fallback_sw_ts(self):
+        """hw_ts=None 时直接返回 sw_ts。"""
+        fn = self._fn()
+        sw_ts = np.linspace(5.0, 6.0, 10)
+        anchor = fn(sw_ts, None)
+        np.testing.assert_array_equal(anchor, sw_ts)
+
+    def test_hw_too_short_fallback_sw_ts(self):
+        """hw_ts 长度 < 2 时 fallback sw_ts。"""
+        fn = self._fn()
+        sw_ts = np.linspace(5.0, 6.0, 10)
+        anchor = fn(sw_ts, hw_ts=np.array([1000.0]))
+        np.testing.assert_array_equal(anchor, sw_ts)
+
+    def test_hw_invalid_r2_fallback_sw_ts(self):
+        """hw_ts 与 sw_ts 线性相关 R² < 0.9999 时 fallback sw_ts。"""
+        fn = self._fn()
+        rng = np.random.default_rng(0)
+        sw_ts = np.linspace(5.0, 6.0, 30)
+        hw_ts = rng.uniform(0, 1e6, 30)        # 随机，R² << 0.9999
+        anchor = fn(sw_ts, hw_ts)
+        np.testing.assert_array_equal(anchor, sw_ts)
+
+    def test_hw_tiny_slope_fallback_sw_ts(self):
+        """slope 接近 0 时 fallback sw_ts（除法保护）。"""
+        fn = self._fn()
+        sw_ts = np.linspace(5.0, 6.0, 20)
+        # hw_ts 几乎常数 → slope ≈ 0，触发除法保护
+        rng = np.random.default_rng(1)
+        hw_ts = np.ones(20) * 1000.0 + rng.uniform(-1e-15, 1e-15, 20)
+        anchor = fn(sw_ts, hw_ts)
+        np.testing.assert_array_equal(anchor, sw_ts,
+                                      err_msg="slope≈0 时应 fallback sw_ts")

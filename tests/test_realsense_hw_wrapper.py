@@ -457,20 +457,23 @@ def test_record_episode_plain_cam_hw_ts_fallback_sw_ts():
 # ---------------------------------------------------------------------------
 
 def test_align_offline_uses_hw_timestamp_when_valid(tmp_path):
-    """align_by_image_timestamp 在 hw_timestamp 有效时用 hw_ts 作为锚时间轴。"""
+    """hw_timestamp 有效时，anchor_ts 在 monotonic 秒域（Bug1 修复验证）。
+
+    修复前：_select_anchor_ts 直接返回毫秒原值（1e6 量级），导致对 arm_ts（秒域）
+    做 np.interp 时全端点外推。修复后：经逆变换映射回 monotonic 秒域，与 arm_ts 同基准。
+    """
     import h5py
 
     sys.path.insert(0, os.path.join(_REPO, "scripts"))
     from tools.align_offline import align_by_image_timestamp
 
-    # 构造合成 v2 hdf5
     ep_path = str(tmp_path / "ep.h5")
     N = 20
-    sw_ts = np.linspace(0.0, 0.633, N)         # 软件戳（秒）
-    # hw_ts：与 sw_ts 线性相关，slope≈1.0，单位毫秒（乘以1000）
-    hw_ts_ms = sw_ts * 1000.0 + 12345.0        # 完美线性，R²=1.0
+    sw_ts = np.linspace(10.0, 10.633, N)       # 软件戳（秒，模拟 monotonic）
+    # hw_ts：与 sw_ts 完美线性，模拟 RealSense global_time（毫秒 + 大偏移）
+    hw_ts_ms = sw_ts * 1000.0 + 1_234_567.0    # R²=1.0，量级 ~1.24e6 ms
 
-    arm_ts = sw_ts + 0.001                     # arm 略有偏移
+    arm_ts = sw_ts + 0.001
     eff_ts = sw_ts + 0.002
 
     with h5py.File(ep_path, "w") as f:
@@ -489,15 +492,14 @@ def test_align_offline_uses_hw_timestamp_when_valid(tmp_path):
         eff.create_dataset("timestamp", data=eff_ts)
 
         cam = obs.create_group("camera")
-        rgb = cam.create_group("rgb")
-        cn_grp = rgb.create_group("wrist_image")
-        # 存入 vlen bytes images（空）
+        rgb_grp = cam.create_group("rgb")
+        cn_grp = rgb_grp.create_group("wrist_image")
         _VLEN_BYTES = h5py.special_dtype(vlen=np.dtype("uint8"))
         imgs = cn_grp.create_dataset("images", (N,), dtype=_VLEN_BYTES)
         for i in range(N):
             imgs[i] = np.array([], dtype=np.uint8)
-        cn_grp.create_dataset("timestamp", data=sw_ts)      # 软件戳（秒）
-        cn_grp.create_dataset("hw_timestamp", data=hw_ts_ms)  # 硬件戳（毫秒）
+        cn_grp.create_dataset("timestamp", data=sw_ts)
+        cn_grp.create_dataset("hw_timestamp", data=hw_ts_ms)
         cn_grp.create_dataset("stale", data=np.zeros(N, dtype=bool))
 
         hifreq = obs.create_group("state_hifreq")
@@ -513,16 +515,21 @@ def test_align_offline_uses_hw_timestamp_when_valid(tmp_path):
 
     aligned = align_by_image_timestamp(ep_path, on_stale="interpolate")
 
-    # hw_timestamp 有效 → anchor_ts 应等于 hw_ts_ms（毫秒值）
     assert "anchor_ts" in aligned
     anchor_ts = aligned["anchor_ts"]
     assert len(anchor_ts) == N
-    # 验证 anchor_ts 是 hw_ts_ms（毫秒量级）而非 sw_ts（秒量级）
-    assert anchor_ts[0] >= 1000.0, (
-        f"anchor_ts[0]={anchor_ts[0]} 看起来不是毫秒硬件戳（应 >= 1000ms）"
+
+    # Bug1 核心验证：anchor_ts 必须在 monotonic 秒域，不是毫秒量级
+    assert anchor_ts[0] < 1000.0, (
+        f"anchor_ts[0]={anchor_ts[0]:.2f} 仍是毫秒量级（Bug 未修复）。"
+        f"修复后应在秒量级（<1000s），与 arm_ts({arm_ts[0]:.2f}s) 同基准"
     )
-    np.testing.assert_allclose(anchor_ts, hw_ts_ms, rtol=1e-9,
-                               err_msg="anchor_ts 应等于 hw_timestamp（毫秒）")
+    # 逆变换精度：完美线性时误差应 < 1e-6s
+    np.testing.assert_allclose(anchor_ts, sw_ts, atol=1e-6,
+                               err_msg="hw 达标时 anchor_ts 经逆变换应接近 sw_ts（误差<1e-6s）")
+    # anchor_ts 与 arm_ts 范围重叠（不再全端点外推）
+    assert anchor_ts[0] >= arm_ts[0] - 0.1, "anchor_ts 应与 arm_ts 范围重叠（不全外推）"
+    assert anchor_ts[-1] <= arm_ts[-1] + 0.1, "anchor_ts 应与 arm_ts 范围重叠（不全外推）"
 
 
 def test_align_offline_fallback_sw_ts_when_hw_invalid(tmp_path):
@@ -587,3 +594,93 @@ def test_align_offline_fallback_sw_ts_when_hw_invalid(tmp_path):
     )
     np.testing.assert_allclose(anchor_ts, sw_ts, rtol=1e-9,
                                err_msg="hw_ts 无效时 anchor_ts 应等于 sw_ts（秒）")
+
+
+# ---------------------------------------------------------------------------
+# 测试 5：RealsenseHwWrapper.read() 返回的 rgb 是独立副本（Bug2 修复）
+# ---------------------------------------------------------------------------
+
+def test_wrapper_read_rgb_is_independent_copy(monkeypatch):
+    """read() 返回的 rgb 是独立 ndarray，修改底层 buffer 不影响已返回的 rgb。
+
+    Bug 修复验证：np.asanyarray(get_data()) 返回的是视图（指向 RealSense buffer），
+    buffer 被下一帧复用后 rgb 内容会变脏。修复后用 np.array() 强制 copy，
+    返回的 rgb 与底层 buffer 完全独立。
+    """
+    # Mock：get_data() 返回一个可以被外部修改的 buffer（模拟 RealSense 底层可变 buffer）
+    source_buffer = np.zeros((480, 640, 3), dtype=np.uint8)
+    source_buffer[0, 0, 0] = 42  # 初始值
+
+    class _MutableColorFrame:
+        def get_timestamp(self):
+            return 1234.5
+
+        def get_data(self):
+            return source_buffer  # 返回同一个 buffer（模拟 RealSense 内部 buffer 共享）
+
+        def __bool__(self):
+            return True
+
+    class _MutableFrames:
+        def get_color_frame(self):
+            return _MutableColorFrame()
+
+    class _MutablePipeline:
+        _started = False
+
+        def start(self, config):
+            self._started = True
+            return _FakeProfile()
+
+        def try_wait_for_frames(self, timeout_ms=200):
+            return True, _MutableFrames()
+
+        def wait_for_frames(self, timeout_ms=1000):
+            return _MutableFrames()
+
+        def stop(self):
+            self._started = False
+
+    fake_rs = _make_fake_rs_module(pipeline_factory=lambda: _MutablePipeline())
+    monkeypatch.setitem(sys.modules, "pyrealsense2", fake_rs)
+
+    wrapper_mod = _load_wrapper_mod()
+    wrapper = wrapper_mod.RealsenseHwWrapper("SN_copy", 640, 480, 30)
+    wrapper.connect()
+
+    rgb, _ = wrapper.read()
+
+    # 验证初始值正确
+    assert rgb[0, 0, 0] == 42, f"read() 后 rgb[0,0,0] 应为 42，得到 {rgb[0,0,0]}"
+
+    # 模拟 RealSense pipeline 读下一帧（修改 source_buffer 内容）
+    source_buffer[0, 0, 0] = 99  # "buffer 被复用，新帧内容写入"
+
+    # Bug 修复验证：已返回的 rgb 不受 source_buffer 修改影响
+    assert rgb[0, 0, 0] == 42, (
+        f"rgb[0,0,0] 被 source_buffer 修改影响（值变成 {rgb[0,0,0]}）。"
+        f"Bug：np.asanyarray 返回视图；修复后应用 np.array() 强制独立 copy"
+    )
+
+    wrapper.disconnect()
+
+
+def test_wrapper_read_rgb_owns_data(monkeypatch):
+    """read() 返回的 rgb ndarray 拥有自己的数据（OWNDATA=True）。
+
+    np.array(x) 默认 copy → OWNDATA=True；np.asanyarray(x) 可能返回视图 OWNDATA=False。
+    """
+    fake_rs = _make_fake_rs_module()
+    monkeypatch.setitem(sys.modules, "pyrealsense2", fake_rs)
+
+    wrapper_mod = _load_wrapper_mod()
+    wrapper = wrapper_mod.RealsenseHwWrapper("SN_own", 640, 480, 30)
+    wrapper.connect()
+
+    rgb, _ = wrapper.read()
+
+    assert rgb.flags["OWNDATA"], (
+        "rgb.flags['OWNDATA'] 应为 True（独立 copy），"
+        "但得到 False（视图，依赖 RealSense buffer 生命周期）"
+    )
+    wrapper.disconnect()

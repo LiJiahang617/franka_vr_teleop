@@ -197,21 +197,25 @@ def _select_anchor_ts(
     sw_ts: np.ndarray,
     hw_ts: np.ndarray | None,
 ) -> np.ndarray:
-    """选择锚时间轴：hw_ts 线性相关达标时返回 hw_ts，否则 fallback sw_ts。
+    """选择锚时间轴，返回值**始终在 monotonic 秒域**。
+
+    hw_ts 线性相关达标（R² > 0.9999）时，把 hw_ts 经回归逆变换映射回 monotonic 秒域
+    后返回（保留 hw 戳的低抖动特性，同时与 arm_ts/eff_ts/act_ts 单位统一）；
+    否则直接 fallback 到 sw_ts（已是 monotonic 秒）。
 
     Args:
         sw_ts: 软件时间戳（秒，monotonic），shape (N,)。
         hw_ts: 硬件时间戳（毫秒，global_time），shape (N,)，或 None（字段缺失）。
 
     Returns:
-        锚时间轴 (N,) float64：hw_ts（毫秒）或 sw_ts（秒）。
+        锚时间轴 (N,) float64，**单位：monotonic 秒**。
+        hw 达标时为 hw_ts 去抖后映射回 monotonic 秒的值；否则即 sw_ts 原值。
     """
     if hw_ts is None or len(hw_ts) < 2:
         return sw_ts
 
-    # 线性回归：hw_ts_s ≈ slope * sw_ts + intercept
-    # 中心化减少数值误差
-    hw_ts_s = hw_ts / 1000.0  # 毫秒 → 秒（与 sw_ts 单位统一后做回归）
+    # 线性回归：hw_c ≈ slope * sw_c + intercept（中心化减少数值误差）
+    hw_ts_s = hw_ts / 1000.0  # 毫秒 → 秒，与 sw_ts 单位统一后做回归
     sw_c = sw_ts - sw_ts[0]
     hw_c = hw_ts_s - hw_ts_s[0]
 
@@ -228,10 +232,17 @@ def _select_anchor_ts(
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
 
     if r2 > _HW_TS_R2_THRESHOLD:
-        # hw_ts 线性相关达标：用 hw_ts（毫秒单位）作为锚时间轴
-        return hw_ts.astype(np.float64)
+        # hw_ts 线性相关达标：把 hw_ts 经回归逆变换映射回 monotonic 秒域。
+        # 正变换：hw_c = slope * sw_c + intercept
+        # 逆变换：sw_c_hat = (hw_c - intercept) / slope
+        # → anchor[i] = sw_c_hat[i] + sw_ts[0]
+        if abs(slope) < 1e-10:
+            # slope 过小（hw_ts 几乎不随 sw_ts 变化）：逆变换数值不稳定，fallback
+            return sw_ts
+        sw_c_hat = (hw_c - intercept) / slope
+        return (sw_c_hat + sw_ts[0]).astype(np.float64)
 
-    # fallback：hw_ts 不可用
+    # fallback：hw_ts 不可用或线性相关不达标
     return sw_ts
 
 

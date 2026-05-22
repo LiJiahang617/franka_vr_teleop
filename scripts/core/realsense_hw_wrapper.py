@@ -154,7 +154,7 @@ class RealsenseHwWrapper:
             )
 
         hw_ts_ms = color_frame.get_timestamp()           # 毫秒，硬件全局戳
-        rgb = np.asanyarray(color_frame.get_data())      # (H, W, 3) uint8 RGB
+        rgb = np.array(color_frame.get_data())           # (H, W, 3) uint8 RGB，独立副本（不依赖 RealSense buffer）
 
         return rgb, hw_ts_ms
 
