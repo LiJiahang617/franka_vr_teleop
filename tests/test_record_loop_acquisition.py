@@ -98,7 +98,7 @@ def test_acquisition_threads_start_and_stop_cleanly():
     # 记录录制前的线程数（基准）
     before = threading.active_count()
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         robot, teleop, fps=30.0, max_sec=0.1,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -122,7 +122,7 @@ def test_camera_read_called_by_sensor_thread():
     robot = FakeRobot()
     teleop = FakeTeleop()
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         robot, teleop, fps=30.0, max_sec=0.15,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -141,7 +141,7 @@ def test_v2_fields_present_in_frames():
     robot = FakeRobot()
     teleop = FakeTeleop()
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         robot, teleop, fps=30.0, max_sec=0.1,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -174,7 +174,7 @@ def test_arm_effector_share_robot_state_thread_ts():
     robot = FakeRobot()
     teleop = FakeTeleop()
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         robot, teleop, fps=30.0, max_sec=0.1,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -200,7 +200,7 @@ def test_cam_ts_independent_from_arm_ts():
     robot.cameras = {"wrist_image": cam}
     teleop = FakeTeleop()
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         robot, teleop, fps=10.0, max_sec=0.2,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -231,7 +231,7 @@ def test_frame_observer_called_before_encode():
     def obs_fn(cam_name, img):
         seen_types.append((cam_name, type(img).__name__, img.dtype.str if hasattr(img, "dtype") else None))
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         robot, teleop, fps=30.0, max_sec=0.1,
         gripper_max_open=0.08, cam_names=["wrist_image"],
         frame_observer=obs_fn,

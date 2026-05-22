@@ -71,7 +71,7 @@ def test_gripper_cmd_comes_from_action_not_robot_state():
     m = _load()
     # teleop 返回 gripper_cmd_bin=1.0，robot 观测侧 gripper_state_norm=0.5
     teleop = FakeTeleop(gripper_cmd_bin=1.0)
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         FakeRobot(), teleop, fps=50.0, max_sec=0.05,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -87,7 +87,7 @@ def test_gripper_cmd_reflects_action_value_zero():
     """teleop 返回 gripper_cmd_bin=0.0 时，帧中 gripper_cmd 应为 0.0。"""
     m = _load()
     teleop = FakeTeleop(gripper_cmd_bin=0.0)
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         FakeRobot(), teleop, fps=50.0, max_sec=0.05,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -226,7 +226,7 @@ def test_send_action_in_record_episode_holds_lock():
     robot = SlowReadRobot()
     teleop = FakeTeleop()
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         robot, teleop, fps=10.0, max_sec=0.2,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -246,7 +246,7 @@ def test_warmup_timeout_logs_warning_for_missing_sensor(caplog):
     m = _load()
 
     with caplog.at_level(logging.WARNING, logger="rec_hdf5"):
-        buf = m.record_episode(
+        buf, _ = m.record_episode(
             FakeRobot(), FakeTeleop(), fps=50.0, max_sec=0.05,
             gripper_max_open=0.08, cam_names=["wrist_image"],
         )
@@ -267,7 +267,7 @@ def test_warmup_timeout_extended_to_half_second():
     m = _load()
     # fps=50 → period=0.02s → 2*period=0.04s → warm_timeout=max(0.04, 0.5)=0.5s
     # max_sec=0.6s 足够录到帧
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         FakeRobot(), FakeTeleop(), fps=50.0, max_sec=0.6,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )
@@ -283,7 +283,7 @@ def test_frame_ts_is_snapshot_time_not_after_encode():
     验证：ts < 帧中所有模态时间戳 + 合理余量（ts 是 snapshot 时刻，不含编码开销）。
     """
     m = _load()
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         FakeRobot(), FakeTeleop(), fps=30.0, max_sec=0.1,
         gripper_max_open=0.08, cam_names=["wrist_image"],
     )

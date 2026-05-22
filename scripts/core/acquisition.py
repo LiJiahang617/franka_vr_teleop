@@ -194,3 +194,152 @@ class AcquisitionHub:
 
     def __len__(self) -> int:
         return len(self._sensors)
+
+
+class HistorySample:
+    """单次累积采样。"""
+    __slots__ = ("data", "ts", "poly_ts")
+
+    def __init__(self, data: Any, ts: float, poly_ts: float):
+        self.data = data
+        self.ts = ts            # time.monotonic() 采样后立即打戳
+        self.poly_ts = poly_ts  # polymetis 侧时间戳（无则用 ts 占位）
+
+
+class HistoryCollectorThread:
+    """高频累积采集线程：把每次 read_fn 的结果全部追加到历史列表。
+
+    录制期间后台持续采集，录制结束后调用 get_history() 取出全部样本。
+    调用 stop() 置停止标志并 join 线程后才能安全调用 get_history()。
+
+    Args:
+        name: 线程名称（调试用）。
+        read_fn: 无参可调用，返回本次采样数据（dict 或任意类型）。
+                 若返回 dict 且含 "poly_ts" 键（float），该值用作 poly_ts；
+                 否则 poly_ts 用 time.monotonic() 占位（与 ts 相同）。
+                 调用方负责在 read_fn 内持 zerorpc_lock（外部约束，非本类负责）。
+        target_rate: 目标采集频率（Hz），必须 > 0。
+        stop_event: 外部共享停止事件（可与其他 SensorThread 共享）。
+    """
+
+    def __init__(
+        self,
+        name: str,
+        read_fn: Callable[[], Any],
+        target_rate: float,
+        stop_event: Optional[threading.Event] = None,
+    ):
+        if target_rate <= 0:
+            raise ValueError(f"target_rate 必须 > 0，收到 {target_rate}")
+
+        self.name = name
+        self._read_fn = read_fn
+        self._target_rate = float(target_rate)
+        self._stop_event = stop_event if stop_event is not None else threading.Event()
+
+        self._lock = threading.Lock()
+        self._history: list[HistorySample] = []
+        self._last_error: Optional[Exception] = None
+
+        self._thread = threading.Thread(
+            target=self._loop,
+            name=f"HistoryCollector-{name}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    # ------------------------------------------------------------------
+    # 公有接口
+    # ------------------------------------------------------------------
+
+    @property
+    def target_rate(self) -> float:
+        """目标采集频率（Hz）。"""
+        return self._target_rate
+
+    @property
+    def last_error(self) -> Optional[Exception]:
+        """最后一次 read_fn 抛出的异常（None 表示无异常）。"""
+        return self._last_error
+
+    def get_history(self) -> list[HistorySample]:
+        """返回截止当前所有累积采样的快照（copy），线程安全。
+
+        建议在 stop() + join() 之后调用，以获取完整历史。
+        """
+        with self._lock:
+            return list(self._history)
+
+    def stop(self, timeout: float = 2.0) -> bool:
+        """置停止事件并 join 线程。
+
+        Args:
+            timeout: 等待线程退出的最长时间（秒）。
+
+        Returns:
+            True 表示线程已成功停止，False 表示 join 超时后线程仍存活。
+        """
+        self._stop_event.set()
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            logger.warning(
+                "HistoryCollectorThread '%s' 在 %.1fs 内未能停止，线程仍存活",
+                self.name,
+                timeout,
+            )
+            return False
+        return True
+
+    def is_alive(self) -> bool:
+        """返回线程是否仍在运行。"""
+        return self._thread.is_alive()
+
+    def sample_count(self) -> int:
+        """已累积采样数（线程安全）。"""
+        with self._lock:
+            return len(self._history)
+
+    # ------------------------------------------------------------------
+    # 内部
+    # ------------------------------------------------------------------
+
+    def _loop(self) -> None:
+        """采集主循环：按 target_rate 节拍 read → 立即打戳 → 追加到历史列表。
+
+        节拍语义与 SensorThread 相同：
+        - 正常：next_tick += interval，然后 stop_event.wait(sleep_dur)。
+        - 超时（read_fn 耗时超过 interval）：不睡，重置 next_tick 到当前时刻。
+        """
+        interval = 1.0 / self._target_rate
+        next_tick = time.monotonic()
+
+        while not self._stop_event.is_set():
+            try:
+                data = self._read_fn()
+                ts = time.monotonic()   # read_fn 返回后立即打软件戳
+
+                # 从 data 中提取 poly_ts（若 read_fn 返回含 poly_ts 的 dict）
+                if isinstance(data, dict) and "poly_ts" in data:
+                    poly_ts = float(data["poly_ts"])
+                else:
+                    poly_ts = ts  # 无 polymetis 戳时用 monotonic 占位
+
+                sample = HistorySample(data=data, ts=ts, poly_ts=poly_ts)
+                with self._lock:
+                    self._history.append(sample)
+
+            except Exception as exc:
+                self._last_error = exc
+                logger.warning(
+                    "HistoryCollectorThread '%s' read_fn 抛出异常（将在下一拍重试）: %s",
+                    self.name,
+                    exc,
+                )
+
+            next_tick += interval
+            now = time.monotonic()
+            sleep_dur = next_tick - now
+            if sleep_dur > 0:
+                self._stop_event.wait(sleep_dur)
+            else:
+                next_tick = time.monotonic()

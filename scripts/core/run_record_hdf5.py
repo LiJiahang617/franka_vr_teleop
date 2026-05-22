@@ -37,7 +37,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 
 # 纯逻辑依赖（无硬件）：可在模块顶层 import，测试加载安全
 from core import paths as _paths
-from core.acquisition import AcquisitionHub, SensorThread
+from core.acquisition import AcquisitionHub, HistoryCollectorThread, SensorThread
 from core.async_saver import AsyncEpisodeSaver
 from core.hdf5_writer import write_episode
 from core.record_params import resolve_record_fps, extract_joint_vel, realsense_fps, parse_reset_config, resolve_record_overrides
@@ -225,9 +225,71 @@ def _make_camera_read_fn(cam):
     return _read
 
 
+
+def _make_state_hifreq_read_fn(robot, zerorpc_lock):
+    """构造 state_hifreq 240Hz 累积采集线程的 read_fn。
+
+    设计：zerorpc client（robot._robot）非线程安全，所有 zerorpc 调用必须持
+    zerorpc_lock 才能执行。与 robot_state 线程、主循环 send_action 串行互斥。
+    若 robot._robot 不存在（FakeRobot 等测试替身），回退到 robot.get_observation()
+    并提取 arm 字段（同样持锁，保持对称）。
+
+    返回的 dict 含 joints/joint_vel/ee_pose（数据）和 poly_ts（polymetis 侧时间戳）。
+    真机若 zerorpc 接口无 poly_ts，则 poly_ts 用 time.monotonic() 占位（Task 9 验证）。
+    HistoryCollectorThread 会从返回 dict 中取 "poly_ts" 键；若无则也用 monotonic 占位。
+
+    Args:
+        robot: Franka 实例（含 _robot zerorpc client）或测试替身。
+        zerorpc_lock: threading.Lock，保护所有 zerorpc client 调用（必须非 None）。
+
+    Returns:
+        Callable[[], dict]：返回含 joints/joint_vel/ee_pose/poly_ts 的 dict。
+    """
+    import time as _time
+
+    zerorpc_client = getattr(robot, "_robot", None)
+
+    if zerorpc_client is not None:
+        # 真机路径：串行 3 次 zerorpc 调用，持锁与其他线程互斥
+        def _read_hifreq_zerorpc():
+            with zerorpc_lock:
+                joint_pos = zerorpc_client.robot_get_joint_positions()
+                joint_vel = zerorpc_client.robot_get_joint_velocities()
+                ee_pose = zerorpc_client.robot_get_ee_pose()
+                # polymetis 接口暂不转发 poly_ts；用 monotonic 占位（Task 9 验证）
+                poly_ts = _time.monotonic()
+            return {
+                "joints": np.array(joint_pos, dtype=np.float64),
+                "joint_vel": np.array(joint_vel, dtype=np.float64),
+                "ee_pose": np.array(ee_pose, dtype=np.float64),
+                "poly_ts": poly_ts,
+            }
+        return _read_hifreq_zerorpc
+    else:
+        # 测试回退路径：从 get_observation() 提取
+        def _read_hifreq_fallback():
+            with zerorpc_lock:
+                obs = robot.get_observation()
+            poly_ts = _time.monotonic()
+            return {
+                "joints": np.array(
+                    [obs[f"joint_{i+1}.pos"] for i in range(7)], dtype=np.float64
+                ),
+                "joint_vel": np.array(
+                    [obs.get(f"joint_{i+1}.vel", 0.0) for i in range(7)], dtype=np.float64
+                ),
+                "ee_pose": np.array(
+                    [obs[f"ee_pose.{ax}"] for ax in ["x", "y", "z", "rx", "ry", "rz"]],
+                    dtype=np.float64,
+                ),
+                "poly_ts": poly_ts,
+            }
+        return _read_hifreq_fallback
+
 def record_episode(robot, teleop, fps: float, max_sec: float,
                    gripper_max_open: float, cam_names: list,
-                   *, stop_flag=None, frame_observer=None) -> list:
+                   *, stop_flag=None, frame_observer=None,
+                   hifreq_rate: float = 0.0):
     """录制一个 episode，每 tick 从 AcquisitionHub 拉 snapshot 拼帧返回帧列表。
 
     多线程采集架构（Phase D Task 4 核心）：
@@ -251,12 +313,16 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                         在 _encode_jpg 之前调用，传入 (cam_name, rgb_ndarray)。
                         默认 None=零行为变化。
 
+    Args:
+        hifreq_rate: state_hifreq 采集频率（Hz），>0 时启动 HistoryCollectorThread
+                     持 zerorpc_lock 累积采集，0 时不采（M=0 占位）。
+
     Returns:
-        list[dict]：采集的帧列表，每帧含 ts/joints/joint_vel/ee_pose/
-                    gripper_m/gripper_norm/gripper_cmd/delta_ee_pose/cams；
-                    cams[cn] 已是 JPEG 编码后的 uint8 bytes。
-                    v2 扩展字段：arm_ts/effector_ts/cam_ts/cam_hw_ts/
-                    arm_stale/effector_stale/cam_stale（各模态独立时间戳与 stale 标志）。
+        tuple[list[dict], dict | None]：
+        - buf: 帧列表，每帧含 ts/joints/joint_vel/ee_pose/gripper_m/gripper_norm/
+               gripper_cmd/delta_ee_pose/cams（JPEG 编码）及 v2 多模态独立 ts/stale 字段。
+        - state_hifreq_block: dict（joints/joint_vel/pose/timestamp/poly_ts/wrench）
+               或 None（hifreq_rate=0 时）。写盘前传给 write_episode。
     """
     # --- 构造 3 个 SensorThread + AcquisitionHub ---
     # 共享 stop_event，hub.stop() 时一次性停所有线程
@@ -290,6 +356,18 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
             )
 
     hub = AcquisitionHub(sensors)
+
+    # state_hifreq 累积采集线程（Task 7-A：hifreq_rate>0 时启动）
+    # 与 robot_state 线程共享 zerorpc_lock，持锁串行读 zerorpc，不并发。
+    hifreq_collector = None
+    if hifreq_rate > 0:
+        hifreq_fn = _make_state_hifreq_read_fn(robot, zerorpc_lock)
+        hifreq_collector = HistoryCollectorThread(
+            name="state_hifreq",
+            read_fn=hifreq_fn,
+            target_rate=hifreq_rate,
+            stop_event=stop_event,
+        )
 
     buf = []
     period = 1.0 / fps
@@ -414,8 +492,37 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
     finally:
         # 优雅退出：置 stop_event，join 所有采集线程（timeout=2s），无僵尸
         hub.stop()
+        # state_hifreq 采集线程共享同一 stop_event，hub.stop() 已置位；
+        # 只需再 join 等线程完成当前 read_fn 后退出（HistoryCollectorThread.stop 内部再置一次无害）
+        if hifreq_collector is not None:
+            hifreq_collector.stop(timeout=2.0)
 
-    return buf
+    # --- 组装 state_hifreq_block（M>0）或 None（M=0 占位）---
+    state_hifreq_block = None
+    if hifreq_collector is not None:
+        history = hifreq_collector.get_history()
+        if history:
+            ts_arr = np.array([s.ts for s in history], dtype=np.float64)
+            poly_arr = np.array([s.poly_ts for s in history], dtype=np.float64)
+            joints_arr = np.stack([s.data["joints"] for s in history])  # (M,7)
+            jvel_arr = np.stack([s.data["joint_vel"] for s in history])  # (M,7)
+            pose_arr = np.stack([s.data["ee_pose"] for s in history])    # (M,6)
+            state_hifreq_block = {
+                "joints": joints_arr,
+                "joint_vel": jvel_arr,
+                "pose": pose_arr,
+                "timestamp": ts_arr,
+                "poly_ts": poly_arr,
+                "wrench": np.zeros((len(history), 6), dtype=np.float64),  # Phase F 实填
+            }
+            log.info(
+                f"[HIFREQ] state_hifreq 采集 M={len(history)} 帧"
+                f"（目标 {hifreq_rate}Hz × {max_sec}s ≈ {hifreq_rate * max_sec:.0f}）"
+            )
+        else:
+            log.warning("[HIFREQ] state_hifreq collector 无采样（可能录制时间太短）")
+
+    return buf, state_hifreq_block
 
 
 def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
@@ -468,9 +575,10 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
                         默认 None=零行为变化，既有测试全绿守门）
     """
     for ep in range(episodes):
-        buf = record_episode(robot, teleop, fps, episode_sec, gripper_max_open,
-                             cam_names, stop_flag=stop_flag,
-                             frame_observer=frame_observer)
+        buf, hifreq_block = record_episode(robot, teleop, fps, episode_sec, gripper_max_open,
+                                           cam_names, stop_flag=stop_flag,
+                                           frame_observer=frame_observer,
+                                           hifreq_rate=240.0)
 
         action = decide(ep)
 
@@ -494,6 +602,7 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
                     quality={},
                     vr_source=vr_source,
                     cam_names=cam_names,
+                    state_hifreq_block=hifreq_block,  # Task 7-A：M>0 实填，None→write_episode 占位
                 ),
             })  # deepcopy 时序：在 buf=None 前
             saver.submit(path, payload)
@@ -570,7 +679,9 @@ def main():
 
     # sink：闭包调 write_episode（Task 2 抽出的模块级函数）
     def sink(path, payload):
-        write_episode(path, payload["frames"], **payload["meta"])
+        meta = dict(payload["meta"])
+        state_hifreq_block = meta.pop("state_hifreq_block", None)
+        write_episode(path, payload["frames"], state_hifreq_block=state_hifreq_block, **meta)
 
     # §11.2 预检门：robot.connect 后、录制前运行，任一不过 → sys.exit(2)（开录前 ~10s 拦截）
     # 目的：把"中途静默失败"变"启动期可行动报错"，避免录完才发现夹爪/色彩异常

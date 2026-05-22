@@ -61,7 +61,7 @@ class FakeTeleop:
 def test_observer_none_is_zero_behavior_change():
     """frame_observer=None 时，record_episode 行为与旧版零变化（守接口兼容性）。"""
     m = _load()
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         FakeRobot(),
         FakeTeleop(),
         fps=50.0,
@@ -80,7 +80,7 @@ def test_observer_called_per_frame_per_cam():
     def obs_fn(cam, img):
         seen.append((cam, img.shape))
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         FakeRobot(),
         FakeTeleop(),
         fps=50.0,
@@ -108,7 +108,7 @@ def test_observer_does_not_mutate_recorded_frame():
         except (ValueError, TypeError):
             pass  # 只读 array 也可接受
 
-    buf = m.record_episode(
+    buf, _ = m.record_episode(
         FakeRobot(),
         FakeTeleop(),
         fps=50.0,
