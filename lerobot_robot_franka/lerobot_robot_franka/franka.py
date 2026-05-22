@@ -65,10 +65,7 @@ class Franka(Robot):
         logger.info("===== [CAM] Cameras Initialized Successfully =====\n")
 
         self.is_connected = True
-        if self.config.control_mode == "oculus":
-            logger.info(f"[INFO] {self.name} env initialized. Control: {self.config.control_mode}, Execute: {self.config.execute_mode}\n")
-        else:
-            logger.info(f"[INFO] {self.name} env initialized. Control: {self.config.control_mode}\n")
+        logger.info(f"[INFO] {self.name} env initialized. Control: {self.config.control_mode}\n")
 
 
     def _check_gripper_connection(self, robot_ip: str):
@@ -175,23 +172,11 @@ class Franka(Robot):
     @property
     def action_features(self) -> dict[str, type]:
         """Return action features based on control mode."""
-        if self.config.control_mode == "isoteleop":
-            features = {}
-            for i in range(self._num_joints):
-                features[f"joint_{i+1}.pos"] = float
-            if self.config.use_gripper:
-                features["gripper_position"] = float
-            return features
-        elif self.config.control_mode in ["spacemouse", "oculus", "unityvr"]:
+        if self.config.control_mode == "unityvr":
             features = {}
             # Delta EE pose (always present)
             for axis in ["x", "y", "z", "rx", "ry", "rz"]:
                 features[f"delta_ee_pose.{axis}"] = float
-
-            # Joint positions from IK (oculus mode with Placo)
-            # if self.config.control_mode == "oculus":
-            #     for i in range(self._num_joints):
-            #         features[f"joint_{i+1}.pos"] = float
             if self.config.use_gripper:
                 features["gripper_cmd_bin"] = float
             return features
@@ -231,49 +216,13 @@ class Franka(Robot):
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
-        
-        if self.config.control_mode == "isoteleop":
-            self._send_action_isoteleop(action)
-        elif self.config.control_mode == "spacemouse":
-            self._send_action_cartesian(action)
-        elif self.config.control_mode == "oculus":
-            if self.config.execute_mode == "joint":
-                self._send_action_oculus_joint(action)
-            else:
-                self._send_action_cartesian(action)
-        elif self.config.control_mode == "unityvr":
+
+        if self.config.control_mode == "unityvr":
             self._send_action_cartesian(action)
         else:
             raise ValueError(f"Unsupported control mode: {self.config.control_mode}")
-        
-        return action
 
-    def _send_action_isoteleop(self, action: dict[str, Any]) -> None:
-        """Send action in isoteleop mode (joint positions)."""
-        target_joints = np.array([action[f"joint_{i+1}.pos"] for i in range(self._num_joints)])
-        
-        if not self.config.debug:
-            try:
-                joint_positions = self._robot.robot_get_joint_positions()
-                max_delta = (np.abs(joint_positions - target_joints)).max()
-                
-                if max_delta > 0.3:
-                    print("MOVING TOO FAST! SLOW DOWN!")
-                    steps = min(int(max_delta / 0.05), 100)
-                    for jnt in np.linspace(joint_positions, target_joints, steps):
-                        self._robot.robot_update_desired_joint_positions(jnt)
-                        time.sleep(0.02)
-                else:
-                    self._robot.robot_update_desired_joint_positions(target_joints)
-            except Exception as e:
-                logger.warning(f"[ROBOT] isoteleop action failed: {e}, trying to restart controller...")
-                try:
-                    self._robot.robot_start_joint_impedance_control()
-                except Exception as e2:
-                    logger.error(f"[ROBOT] Failed to restart controller: {e2}")
-        
-        if "gripper_position" in action:
-            self._handle_gripper(action["gripper_position"], is_binary=False)
+        return action
 
     def _send_action_cartesian(self, action: dict[str, Any]) -> None:
         """Send action in spacemouse/oculus mode (delta ee pose)."""
@@ -377,74 +326,6 @@ class Franka(Robot):
                     self._robot.robot_update_desired_ee_pose(target_ee_pose)
                 except Exception as e:
                     logger.warning(f"[ROBOT] zerorpc error: {e}")
-        
-        if "gripper_cmd_bin" in action:
-            self._handle_gripper(action["gripper_cmd_bin"], is_binary=True)
-
-    def _send_action_oculus_joint(self, action: dict[str, Any]) -> None:
-        """Send action in oculus mode using joint positions from Placo IK.
-        
-        Uses joint_{1..7}.pos from the action dict (computed by Placo IK in OculusRobot).
-        The delta_ee_pose is still recorded in the dataset but not used for execution.
-        Reset and gripper handling are shared with cartesian mode.
-        """
-        # Check for reset request (same logic as cartesian mode)
-        if action.get("reset_requested", False):
-            logger.info("[ROBOT] Reset requested, moving to home position...")
-            try:
-                ee_positions_reset = np.array(
-                    [0.55581301, 0.00308523, 0.44111654, -2.22150303, -2.15458315, 0.00646556]
-                )
-                print(f"\nMoving ee to: {ee_positions_reset} ...\n")
-                self._robot.robot_move_to_ee_pose(pose=ee_positions_reset, time_to_go=2.0)
-                self._robot.gripper_goto(
-                    width=self.config.gripper_max_open,
-                    speed=self._gripper_speed,
-                    force=self._gripper_force,
-                    blocking=True
-                )
-                self._robot.robot_start_joint_impedance_control()
-            except Exception as e:
-                logger.warning(f"[ROBOT] Reset failed: {e}, trying to restart controller...")
-                try:
-                    self._robot.robot_start_joint_impedance_control()
-                except Exception as e2:
-                    logger.error(f"[ROBOT] Failed to restart controller: {e2}")
-            return
-
-        # Extract IK joint positions
-        target_joints = np.array([action.get(f"joint_{i+1}.pos", 0.0) for i in range(self._num_joints)])
-        
-        # Check if joints are valid (non-zero means IK was successful)
-        if np.linalg.norm(target_joints) < 1e-6:
-            # IK not available or RG not pressed, skip
-            if "gripper_cmd_bin" in action:
-                self._handle_gripper(action["gripper_cmd_bin"], is_binary=True)
-            return
-
-        if not self.config.debug:
-            try:
-                current_joints = self._robot.robot_get_joint_positions()
-                max_delta = np.abs(current_joints - target_joints).max()
-                
-                if max_delta > 1.5:
-                    # 极端跳变，直接跳过保安全
-                    logger.warning(f"[ROBOT] Joint delta too large ({max_delta:.3f} rad), skipping for safety")
-                elif max_delta > 0.1:
-                    # 较大变化，插值执行
-                    steps = min(max(int(max_delta / 0.02), 5), 200)
-                    for jnt in np.linspace(current_joints, target_joints, steps):
-                        self._robot.robot_update_desired_joint_positions(jnt)
-                        time.sleep(0.01)
-                else:
-                    # 正常小动作，直接执行
-                    self._robot.robot_update_desired_joint_positions(target_joints)
-            except Exception as e:
-                logger.warning(f"[ROBOT] Joint action failed: {e}, trying to restart controller...")
-                try:
-                    self._robot.robot_start_joint_impedance_control()
-                except Exception as e2:
-                    logger.error(f"[ROBOT] Failed to restart controller: {e2}")
         
         if "gripper_cmd_bin" in action:
             self._handle_gripper(action["gripper_cmd_bin"], is_binary=True)
