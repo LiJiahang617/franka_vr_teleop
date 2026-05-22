@@ -1,4 +1,11 @@
-"""franka-hdf5-v1 → lerobot v2.1 转换器（独立实现，不依赖任何版本 lerobot）。
+"""franka-hdf5-v2 → lerobot v2.1 转换器（独立实现，不依赖任何版本 lerobot）。
+
+v2 变更摘要（相对 v1）：
+  - 转换入口先调 align_offline.align_by_image_timestamp 对齐各模态到图像锚时间轴
+  - observation.state / action 均为 realman 14D 布局（joint×7 + gripper + eef_pos×3 + eef_rot×3）
+  - action = next-state：action[i] = state[i+1]，末帧复制末帧 state
+  - hdf5 中的 action/delta_ee_pose 不使用（保留在 hdf5，转换层不消费）
+  - 移除 --state-layout 旋钮（统一 realman 14D 输出）
 
 功能模块：
   v21_meta    - info.json / tasks.jsonl / episodes.jsonl / episodes_stats.jsonl 构建
@@ -10,7 +17,7 @@
 CLI 用法：
   python scripts/tools/hdf5_to_lerobot_v21.py \\
     --in-dir /path/to/hdf5 --out /path/to/out \\
-    --fps 30 --task "franka task" --robot-type franka --state-layout native
+    --fps 30 --task "franka task" --robot-type franka
 """
 
 import json
@@ -28,12 +35,19 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# 自举：确保 <repo>/scripts 在 sys.path 中（core.* 解析需要；scripts 下无与已安装包同名目录，不触发遮蔽）
+# 自举：确保 <repo>/scripts 在 sys.path 中（core.* 解析需要）
 _REPO_SCRIPTS = Path(__file__).resolve().parents[1]
 if str(_REPO_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_REPO_SCRIPTS))
 
-from tools.hdf5_lerobot_map import ACTION_KEYS, OBS_STATE_KEYS, hdf5_frame_to_lerobot
+from tools.hdf5_lerobot_map import (
+    ACTION_NAMES,
+    OBS_STATE_NAMES,
+    STATE_DIM,
+    ACTION_DIM,
+    episode_to_lerobot_arrays,
+)
+from tools.align_offline import align_by_image_timestamp
 
 # ──────────────────────────────────────────────────────────────────────────────
 # v21_meta：元数据构建纯函数
@@ -58,23 +72,22 @@ def build_info_json(
         total_frames: 帧总数
         total_tasks: task 总数
         cam_specs: 各相机规格 {cam_name: (H, W, C)}
-        action_names: action 特征名列表（7D）
+        action_names: action 特征名列表（14D）
         state_names: observation.state 特征名列表（14D）
 
     Returns:
         符合 lerobot v2.1 schema 的 info.json 字典
     """
-    # 构建 features dict
     features = {}
 
-    # observation.state：数值向量 block
+    # observation.state：数值向量 block（14D，realman 布局）
     features["observation.state"] = {
         "dtype": "float32",
         "shape": [len(state_names)],
         "names": state_names,
     }
 
-    # action：数值向量 block
+    # action：数值向量 block（14D，realman 布局，next-state）
     features["action"] = {
         "dtype": "float32",
         "shape": [len(action_names)],
@@ -193,8 +206,7 @@ def write_meta_files(out_dir: Path, info: dict, tasks: list, episodes: list, sta
         tasks: tasks.jsonl 行列表（每行一个 dict）
         episodes: episodes.jsonl 行列表（每行一个 dict）
         stats_rows: episodes_stats.jsonl 行列表，每行 {'episode_index': int, 'stats':
-            {feature: {min/max/mean/std/count}}}（由 convert 用 compute_episode_stats
-            结果包装，**勿直接传 compute_episode_stats 返回的 dict**）
+            {feature: {min/max/mean/std/count}}}
     """
     meta_dir = Path(out_dir) / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
@@ -219,20 +231,8 @@ def write_meta_files(out_dir: Path, info: dict, tasks: list, episodes: list, sta
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# v21_parquet：episode 帧写入（复用 hdf5_lerobot_map，无图像列）
+# v21_parquet：episode 帧写入（使用 aligned dict + per-episode 接口，无图像列）
 # ──────────────────────────────────────────────────────────────────────────────
-
-# realman state 重排索引（由 OBS_STATE_KEYS 推导，防止 key 序漂移）
-# native layout: joints(0-6), ee_pose(7-12), gripper_norm(13)
-# realman layout: joints(0-6), gripper_norm(13→7), ee_pose(7-12→8-13)
-_REALMAN_STATE_ORDER = (
-    [f"joint_{i+1}.pos" for i in range(7)]
-    + ["gripper_norm"]
-    + [f"ee_pose.{a}" for a in ("x", "y", "z", "rx", "ry", "rz")]
-)
-_REALMAN_STATE_IDX = [OBS_STATE_KEYS.index(k) for k in _REALMAN_STATE_ORDER]
-assert sorted(_REALMAN_STATE_IDX) == list(range(14)), "置换不合法，OBS_STATE_KEYS 结构已变动"  # 自检
-
 
 def episode_to_parquet(
     h5_path: str,
@@ -243,14 +243,14 @@ def episode_to_parquet(
     cam_names: list,
     task: str,
     index_base: int,
-    state_layout: str = "native",
 ) -> tuple:
-    """将 franka-hdf5-v1 episode 写为 lerobot v2.1 parquet。
+    """将 franka-hdf5-v2 episode 写为 lerobot v2.1 parquet。
 
-    复用 hdf5_lerobot_map.hdf5_frame_to_lerobot 取帧（图像丢弃，仅 state/action 入列）。
+    先调 align_by_image_timestamp 对齐各模态到图像锚时间轴，再从 aligned dict
+    组装 14D realman 布局的 state / action（action = next-state）。
     parquet 列（精确顺序）：
       observation.state  fixed_size_list<float32>[14]
-      action             fixed_size_list<float32>[7]
+      action             fixed_size_list<float32>[14]（next-state，14D，与 realman 一致）
       timestamp          float32，row0=0.0，i/fps
       frame_index        int64
       episode_index      int64
@@ -258,63 +258,46 @@ def episode_to_parquet(
       task_index         int64
 
     Args:
-        h5_path: franka-hdf5-v1 文件路径
+        h5_path: franka-hdf5-v2 文件路径
         out_parquet: 输出 parquet 路径（父目录需已存在）
         episode_index: episode 索引
         task_index: task 索引
         fps: 帧率，用于计算 timestamp
         cam_names: 相机名列表（用于读帧，图像不入 parquet）
-        task: task 字符串（传给 hdf5_frame_to_lerobot）
+        task: task 字符串（传给 episode_to_lerobot_arrays）
         index_base: 全局帧起始偏移（跨 episode 连续）
-        state_layout: "native"（默认）或 "realman"（仅重排 observation.state 列序）
 
     Returns:
         (N, stat_arrays)：N 为帧数；stat_arrays = {feature: np.ndarray (N, D)}，
-        供 compute_episode_stats 使用。observation.state (N,14), action (N,7),
+        供 compute_episode_stats 使用。observation.state (N,14), action (N,14),
         其余元列均 (N,1)。
     """
-    if state_layout not in ("native", "realman"):
-        raise ValueError(f"state_layout 必须为 'native' 或 'realman'，实际: {state_layout!r}")
+    # 对齐各模态到图像锚时间轴
+    aligned = align_by_image_timestamp(h5_path)
 
     with h5py.File(h5_path, "r") as h5:
-        N = int(h5["observations/arm/joints"].shape[0])
-        if N == 0:
-            raise ValueError(f"episode_to_parquet: {h5_path} 0 帧，无法转换")
+        ep_data = episode_to_lerobot_arrays(aligned, h5, cam_names=cam_names, task=task)
 
-        states = []
-        actions = []
-        timestamps = []
-        frame_indices = []
-        episode_indices = []
-        indices = []
-        task_indices = []
+    N = ep_data["N"]
+    if N == 0:
+        raise ValueError(f"episode_to_parquet: {h5_path} 0 帧，无法转换")
 
-        for i in range(N):
-            frame = hdf5_frame_to_lerobot(h5, i, cam_names=cam_names, task=task)
+    states_np = ep_data["state"]    # (N, 14) float32
+    actions_np = ep_data["action"]  # (N, 14) float32
 
-            # state 重排（action 不经此分支，保持 7D 原样）
-            state = frame["observation.state"]  # np.float32 (14,)
-            if state_layout == "realman":
-                state = state[_REALMAN_STATE_IDX]
+    timestamps = [np.float32(i / fps).item() for i in range(N)]
+    frame_indices = list(range(N))
+    episode_indices = [episode_index] * N
+    indices = [index_base + i for i in range(N)]
+    task_indices = [task_index] * N
 
-            action = frame["action"]  # np.float32 (7,)
-
-            states.append(state.tolist())
-            actions.append(action.tolist())
-            timestamps.append(np.float32(i / fps).item())  # 故意 float32 对齐 realman timestamp dtype
-            frame_indices.append(i)
-            episode_indices.append(episode_index)
-            indices.append(index_base + i)
-            task_indices.append(task_index)
-
-    # pyarrow fixed_size_list 类型
+    # pyarrow fixed_size_list 类型（14D，与 realman 一致）
     fsl14 = pa.list_(pa.float32(), 14)
-    fsl7 = pa.list_(pa.float32(), 7)
 
     # 严格按列名顺序构建 schema（对标 realman parquet 实测）
     schema = pa.schema([
         pa.field("observation.state", fsl14),
-        pa.field("action", fsl7),
+        pa.field("action", fsl14),
         pa.field("timestamp", pa.float32()),
         pa.field("frame_index", pa.int64()),
         pa.field("episode_index", pa.int64()),
@@ -324,8 +307,8 @@ def episode_to_parquet(
 
     table = pa.table(
         {
-            "observation.state": pa.array(states, type=fsl14),
-            "action": pa.array(actions, type=fsl7),
+            "observation.state": pa.array(states_np.tolist(), type=fsl14),
+            "action": pa.array(actions_np.tolist(), type=fsl14),
             "timestamp": pa.array(timestamps, type=pa.float32()),
             "frame_index": pa.array(frame_indices, type=pa.int64()),
             "episode_index": pa.array(episode_indices, type=pa.int64()),
@@ -338,8 +321,6 @@ def episode_to_parquet(
     pq.write_table(table, out_parquet)
 
     # 构建 stat_arrays（2D，供 compute_episode_stats）
-    states_np = np.array(states, dtype=np.float32)    # (N, 14)
-    actions_np = np.array(actions, dtype=np.float32)  # (N, 7)
     stat_arrays = {
         "observation.state": states_np,
         "action": actions_np,
@@ -364,7 +345,7 @@ def episode_to_videos(
     cam_names: list,
     fps: int,
 ) -> dict:
-    """将 franka-hdf5-v1 episode 各相机图像编码为 h264 mp4 文件。
+    """将 franka-hdf5-v2 episode 各相机图像编码为 h264 mp4 文件。
 
     与 map._decode 通道约定一致：jpeg bytes → BGR(cv2.imdecode) → RGB(cvtColor)
     以 rgb24 喂 ffmpeg（流式逐帧写 stdin），产 yuv420p h264（同 realman 实测参数）。
@@ -372,7 +353,7 @@ def episode_to_videos(
     原子写：先输出 <name>.mp4.tmp，成功后 os.replace 为最终 mp4。
 
     Args:
-        h5_path: franka-hdf5-v1 文件路径
+        h5_path: franka-hdf5-v2 文件路径
         out_dir: 输出根目录
         episode_chunk: chunk 索引（用于路径模板）
         episode_index: episode 索引（用于路径模板）
@@ -504,9 +485,8 @@ def convert(
     fps: float = 30.0,
     task: str = "task",
     robot_type: str = "franka",
-    state_layout: str = "native",
 ) -> None:
-    """将 in_dir 下所有 franka-hdf5-v1 episode 转换为 lerobot v2.1 数据集。
+    """将 in_dir 下所有 franka-hdf5-v2 episode 转换为 lerobot v2.1 数据集。
 
     不合规 episode（validate_episode 返回非空 violations）预校验跳过，不分配输出索引。
     通过校验但处理失败的 episode（parquet/video 异常）则 fail-loud 中止整个 convert。
@@ -517,7 +497,6 @@ def convert(
         fps: 帧率（必须为整数，用于 parquet timestamp 与 info.json）
         task: 任务描述字符串（所有 episode 共用）
         robot_type: 机器人类型（写入 info.json robot_type 字段）
-        state_layout: "native" 或 "realman"（仅影响 state 列序/命名，action 恒 7D 不变）
 
     Raises:
         ValueError: fps 非整数；in_dir 中无 .h5 文件；所有 episode 均不合规
@@ -535,27 +514,15 @@ def convert(
     if not h5_files:
         raise ValueError(f"no hdf5 in {in_dir}")
 
-    # ── state/action names（决定 info.json 中 features names 字段）──
-    if state_layout == "realman":
-        # 对标 realman info.json 命名规范
-        state_names = (
-            [f"joint_{i+1}_rad" for i in range(7)]
-            + ["gripper_open"]
-            + ["eef_pos_x", "eef_pos_y", "eef_pos_z"]
-            + ["eef_rot_euler_x", "eef_rot_euler_y", "eef_rot_euler_z"]
-        )
-    else:
-        # native：直接用 OBS_STATE_KEYS（human-readable 短名）
-        state_names = list(OBS_STATE_KEYS)
+    # state/action names：统一 realman 14D 布局
+    state_names = list(OBS_STATE_NAMES)
+    action_names = list(ACTION_NAMES)
 
-    # action_names 恒由 ACTION_KEYS 衍生，与 state_layout 无关
-    action_names = list(ACTION_KEYS)
-
-    # ── 创建输出目录结构 ──
+    # 创建输出目录结构
     (out / "meta").mkdir(parents=True, exist_ok=True)
     (out / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
 
-    # ── 逐 episode 转换 ──
+    # 逐 episode 转换
     episodes_rows = []   # [(out_ei, [task], N), ...]
     stats_rows = []      # [{"episode_index": out_ei, "stats": {...}}, ...]
     total_frames = 0
@@ -571,7 +538,7 @@ def convert(
     _schema = load_franka_hdf5_schema()
 
     for src_idx, h5_path in enumerate(h5_files):
-        # ── 预校验：不合规直接跳过，不分配 out 索引 ──
+        # 预校验：不合规直接跳过，不分配 out 索引
         violations = _schema.validate_episode(h5_path)
         if violations:
             logging.warning(
@@ -580,7 +547,7 @@ def convert(
             )
             continue
 
-        # ── 首个合规 episode：确定相机名与图像尺寸 ──
+        # 首个合规 episode：确定相机名与图像尺寸
         if cam_names is None:
             with h5py.File(h5_path, "r") as h5:
                 cam_names = sorted(h5["observations/camera/rgb"].keys())
@@ -593,7 +560,7 @@ def convert(
                 H, W = frame0_bgr.shape[:2]
             cam_specs = {cam: (H, W, 3) for cam in cam_names}
         else:
-            # ── 后续 episode：校验相机名与尺寸一致性 ──
+            # 后续 episode：校验相机名与尺寸一致性
             with h5py.File(h5_path, "r") as h5:
                 ep_cams = sorted(h5["observations/camera/rgb"].keys())
                 first_bytes = bytes(h5[f"observations/camera/rgb/{ep_cams[0]}/images"][0])
@@ -617,7 +584,6 @@ def convert(
             cam_names=cam_names,
             task=task,
             index_base=index_base,
-            state_layout=state_layout,
         )
 
         # 视频导出（fail-loud）
@@ -645,7 +611,7 @@ def convert(
 
     total_episodes = len(episodes_rows)
 
-    # ── 写 meta 文件 ──
+    # 写 meta 文件
     info = build_info_json(
         robot_type=robot_type,
         fps=fps,
@@ -671,7 +637,7 @@ def main() -> None:
     from core import paths
 
     parser = argparse.ArgumentParser(
-        description="franka-hdf5-v1 → lerobot v2.1 转换器",
+        description="franka-hdf5-v2 → lerobot v2.1 转换器",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -687,12 +653,6 @@ def main() -> None:
     parser.add_argument("--fps", type=float, default=30.0, help="帧率")
     parser.add_argument("--task", default="task", help="任务描述字符串")
     parser.add_argument("--robot-type", default="franka", help="机器人类型（写入 info.json）")
-    parser.add_argument(
-        "--state-layout",
-        choices=["native", "realman"],
-        default="native",
-        help="observation.state 列序/命名（native=OBS_STATE_KEYS 原序，realman=对标 realman 命名）",
-    )
 
     args = parser.parse_args()
     convert(
@@ -701,7 +661,6 @@ def main() -> None:
         fps=args.fps,
         task=args.task,
         robot_type=args.robot_type,
-        state_layout=args.state_layout,
     )
 
 

@@ -1,11 +1,17 @@
-"""franka-hdf5-v1 episodes → 标准 LeRobotDataset。lerobot 怪问题隔离于此一处。
+"""franka-hdf5-v2 episodes → 标准 LeRobotDataset。lerobot 怪问题隔离于此一处。
 
 ⚠️ 版本注意(2026-05-19, 用户决策): 本脚本用 franka2 环境内 lerobot(v3.0), 产出
    codebase_version=v3.0 数据集(meta=tasks.parquet/episodes/chunk/file.parquet/
    stats.json; 文件名 file-NNN; videos/{key}/chunk/)。用户既有训练/可视化管线
    (RoboCOIN visualize_dataset / realman 参考集 / GR00T modality.json)均为 v2.1,
    与 v3.0 不互通(lerobot 对 codebase_version 强校验)。按用户决策本脚本保留产
-   v3.0 不改; 产 v2.1 由【独立 v2.1 转换器】负责(见 spec §11.5, 与 Codex 协作设计)。
+   v3.0 不改; 产 v2.1 由【独立 v2.1 转换器】负责(见 spec §11.5)。
+
+Task 6 适配（schema v2 + 14D realman 布局）：
+  - 转换入口调 align_offline.align_by_image_timestamp 对齐各模态到图像锚时间轴
+  - observation.state / action 均为 realman 14D 布局
+  - action = next-state：action[i] = state[i+1]，末帧复制
+  - hdf5 的 action/delta_ee_pose 不使用
 
 用法:
   envs/franka-teleop/bin/python lerobot_franka_teleop/scripts/tools/hdf5_to_lerobot.py \\
@@ -27,7 +33,8 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 from core.schema_loader import load_franka_hdf5_schema
 S = load_franka_hdf5_schema()
-from tools.hdf5_lerobot_map import build_feature_specs, hdf5_frame_to_lerobot
+from tools.hdf5_lerobot_map import build_feature_specs, episode_to_lerobot_arrays
+from tools.align_offline import align_by_image_timestamp
 
 log = logging.getLogger("h5->lerobot")
 
@@ -73,12 +80,31 @@ def convert(in_dir, repo_id, fps, root, task="task"):
         if v:
             log.warning(f"跳过不合规 {ep}: {v}")
             continue
+
+        # 对齐各模态到图像锚时间轴
+        aligned = align_by_image_timestamp(ep)
+
         with h5py.File(ep, "r") as f:
-            N = f["observations/timestamp"].shape[0]
-            for i in range(N):
-                ds.add_frame(hdf5_frame_to_lerobot(f, i, cams, task=task))
+            ep_data = episode_to_lerobot_arrays(aligned, f, cam_names=cams, task=task)
+
+        N = ep_data["N"]
+        state_arr = ep_data["state"]    # (N, 14) float32
+        action_arr = ep_data["action"]  # (N, 14) float32
+        images = ep_data["images"]      # {cam: [ndarray...]}
+
+        for i in range(N):
+            frame = {
+                "observation.state": state_arr[i],
+                "action": action_arr[i],
+                "task": task,
+            }
+            for c in cams:
+                frame[f"observation.images.{c}"] = images[c][i]
+            ds.add_frame(frame)
+
         ds.save_episode()
         log.info(f"已转 {ep} ({N} 帧)")
+
     log.info(f"完成 -> {root or '默认 HF home'} repo={repo_id}")
 
 

@@ -38,7 +38,7 @@ _SCRIPT = _SCRIPTS_DIR / "tools" / "hdf5_to_lerobot_v21.py"
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _make_hdf5(h5_path: Path, n_frames: int, cams=("exterior_image", "wrist_image"), img_hw=(16, 24)):
-    """生成完整合规 franka-hdf5-v1 文件。"""
+    """生成完整合规 franka-hdf5-v2 文件（Task 6 适配 schema v2）。"""
     import franka_hdf5_schema as S
 
     H, W = img_hw
@@ -47,6 +47,8 @@ def _make_hdf5(h5_path: Path, n_frames: int, cams=("exterior_image", "wrist_imag
     assert ok
     jb = np.frombuffer(enc.tobytes(), np.uint8)
     vlen_u8 = h5py.special_dtype(vlen=np.dtype("uint8"))
+    N = n_frames
+    ts = np.arange(N, dtype=np.float64)  # 严格递增时间轴
 
     with h5py.File(h5_path, "w") as f:
         # infos 组（schema 校验需要）
@@ -55,7 +57,7 @@ def _make_hdf5(h5_path: Path, n_frames: int, cams=("exterior_image", "wrist_imag
         ti = inf.create_group("task_info")
         ti.create_dataset("task_name", data=np.bytes_("pick"))
         ti.create_dataset("collection_frequency", data=np.array([30.0, 30.0], np.float64))
-        ti.create_dataset("total_frames", data=np.int64(n_frames))
+        ti.create_dataset("total_frames", data=np.int64(N))
         ti.create_dataset("robot", data=np.bytes_("franka_panda"))
         inf.create_group("camera_params")
         cal = inf.create_group("calibration")
@@ -63,41 +65,49 @@ def _make_hdf5(h5_path: Path, n_frames: int, cams=("exterior_image", "wrist_imag
         cal.create_dataset("quality", data=np.bytes_("{}"))
         cal.create_dataset("vr_source", data=np.bytes_("unity"))
 
-        # observations
+        # observations（v2：删除共用 timestamp，每模态独立 ts + stale）
         obs = f.create_group("observations")
-        obs.create_dataset("timestamp", data=(np.arange(n_frames, dtype=np.float64) + 1).reshape(n_frames, 1))
-        arm = obs.create_group("arm")
-        arm.create_dataset("joints", data=np.arange(n_frames * 7, dtype=np.float64).reshape(n_frames, 7) * 0.1)
-        arm.create_dataset("joint_vel", data=np.zeros((n_frames, 7), np.float64))
-        arm.create_dataset("pose", data=np.arange(n_frames * 6, dtype=np.float64).reshape(n_frames, 6) * 0.2)
-        arm.create_dataset("timestamp", data=np.arange(n_frames, dtype=np.float64))
-        eff = obs.create_group("effector")
-        eff.create_dataset("position", data=np.zeros((n_frames, 1), np.float64))
-        eff.create_dataset("position_norm", data=(np.arange(n_frames, dtype=np.float64) * 0.1 + 0.5).reshape(n_frames, 1))
-        eff.create_dataset("type", data=np.array([b"gripper"] * n_frames, dtype=h5py.special_dtype(vlen=bytes)))
-        eff.create_dataset("timestamp", data=np.arange(n_frames, dtype=np.float64))
 
-        # 相机图像
+        # arm 模态
+        arm = obs.create_group("arm")
+        arm.create_dataset("joints", data=np.arange(N * 7, dtype=np.float64).reshape(N, 7) * 0.1)
+        arm.create_dataset("joint_vel", data=np.zeros((N, 7), np.float64))
+        arm.create_dataset("pose", data=np.arange(N * 6, dtype=np.float64).reshape(N, 6) * 0.2)
+        arm.create_dataset("timestamp", data=ts.copy())
+        arm.create_dataset("stale", data=np.zeros(N, dtype=bool))
+
+        # effector 模态
+        eff = obs.create_group("effector")
+        eff.create_dataset("position", data=np.zeros((N, 1), np.float64))
+        eff.create_dataset("position_norm", data=(np.arange(N, dtype=np.float64) * 0.1 + 0.5).reshape(N, 1))
+        eff.create_dataset("type", data=np.array([b"gripper"] * N, dtype=h5py.special_dtype(vlen=bytes)))
+        eff.create_dataset("timestamp", data=ts.copy())
+        eff.create_dataset("stale", data=np.zeros(N, dtype=bool))
+
+        # camera 模态（v2：每相机 stale + hw_timestamp）
         cam_grp = obs.create_group("camera")
         rgb = cam_grp.create_group("rgb")
         for c in cams:
             g = rgb.create_group(c)
-            d = g.create_dataset("images", (n_frames,), dtype=vlen_u8)
-            for i in range(n_frames):
+            d = g.create_dataset("images", (N,), dtype=vlen_u8)
+            for i in range(N):
                 d[i] = jb
-            g.create_dataset("timestamp", data=np.arange(n_frames, dtype=np.float64))
+            g.create_dataset("timestamp", data=ts.copy())
+            g.create_dataset("stale", data=np.zeros(N, dtype=bool))
+            g.create_dataset("hw_timestamp", data=ts.copy())
 
-        # state_hifreq（空）
+        # state_hifreq（v2：新增 wrench 占位字段）
         hf = obs.create_group("state_hifreq")
         for k, sh in [("joints", (0, 7)), ("joint_vel", (0, 7)), ("pose", (0, 6)),
                       ("timestamp", (0,)), ("poly_ts", (0,))]:
             hf.create_dataset(k, data=np.zeros(sh, np.float64))
+        hf.create_dataset("wrench", data=np.zeros((0, 6), np.float64))
 
-        # action
+        # action（v2：独立严格递增 timestamp，一维）
         act = f.create_group("action")
-        act.create_dataset("delta_ee_pose", data=np.arange(n_frames * 6, dtype=np.float64).reshape(n_frames, 6) * 0.05)
-        act.create_dataset("gripper_cmd", data=(np.arange(n_frames, dtype=np.float64) * 0.25).reshape(n_frames, 1))
-        act.create_dataset("timestamp", data=np.arange(n_frames, dtype=np.float64))
+        act.create_dataset("delta_ee_pose", data=np.arange(N * 6, dtype=np.float64).reshape(N, 6) * 0.05)
+        act.create_dataset("gripper_cmd", data=(np.arange(N, dtype=np.float64) * 0.25).reshape(N, 1))
+        act.create_dataset("timestamp", data=ts.copy() + 0.001)  # 严格递增
 
 
 def _make_two_episodes(in_dir: Path, cams=("exterior_image", "wrist_image")):
@@ -171,7 +181,6 @@ def converted_out(tmp_path_factory):
         fps=30,
         task="pick",
         robot_type="franka",
-        state_layout="native",
     )
     return in_dir, out_dir
 
@@ -233,7 +242,7 @@ class TestInfoJson:
 
     def test_features_action_shape(self):
         f = self.info["features"]
-        assert f["action"]["shape"] == [7]
+        assert f["action"]["shape"] == [14]
         assert f["action"]["dtype"] == "float32"
 
     def test_features_cameras(self):
@@ -364,8 +373,8 @@ class TestEpisodesStatsJsonl:
             stats = row["stats"]
             assert "action" in stats
             s = stats["action"]
-            assert len(s["min"]) == 7
-            assert len(s["max"]) == 7
+            assert len(s["min"]) == 14
+            assert len(s["max"]) == 14
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -406,7 +415,6 @@ def test_cli_subprocess_exit_zero(tmp_path):
             "--fps", "30",
             "--task", "pick",
             "--robot-type", "franka",
-            "--state-layout", "native",
         ],
         capture_output=True,
         text=True,

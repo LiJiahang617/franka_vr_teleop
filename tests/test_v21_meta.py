@@ -16,7 +16,7 @@ def test_info_json_schema():
         robot_type="franka", fps=30,
         total_episodes=2, total_frames=10, total_tasks=1,
         cam_specs={"exterior_image": (240, 424, 3), "wrist_image": (240, 424, 3)},
-        action_names=[f"a{i}" for i in range(7)],
+        action_names=[f"a{i}" for i in range(14)],
         state_names=[f"s{i}" for i in range(14)],
     )
     assert info["codebase_version"] == "v2.1"
@@ -34,7 +34,7 @@ def test_info_json_schema():
     assert f["observation.state"]["shape"] == [14]
     assert len(f["observation.state"]["names"]) == 14
     assert f["action"]["dtype"] == "float32"
-    assert f["action"]["shape"] == [7]
+    assert f["action"]["shape"] == [14]
     vk = "observation.images.exterior_image"
     assert f[vk]["dtype"] == "video"
     assert f[vk]["shape"] == [240, 424, 3]
