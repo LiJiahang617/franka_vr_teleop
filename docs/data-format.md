@@ -1,42 +1,54 @@
 # 数据格式说明
 
-> `franka-hdf5-v1` schema 完整契约、`validate_episode` 校验内容、hdf5→LeRobot 转换流程与差异。
+> `franka-hdf5-v2` schema 完整契约、`validate_episode` 校验内容、hdf5→LeRobot 转换流程与差异。
 
 ## 目录
 
-- [1. franka-hdf5-v1 概览](#1-franka-hdf5-v1-概览)
+- [1. franka-hdf5-v2 概览](#1-franka-hdf5-v2-概览)
 - [2. HDF5 group / dataset 完整 schema](#2-hdf5-group--dataset-完整-schema)
 - [3. validate_episode 校验内容](#3-validate_episode-校验内容)
 - [4. State / Action 维度约定](#4-state--action-维度约定)
 - [5. hdf5 → LeRobot 转换流程](#5-hdf5--lerobot-转换流程)
 - [6. v3.0 与 v2.1 的差异](#6-v30-与-v21-的差异)
+- [7. v1→v2 迁移工具](#7-v1v2-迁移工具)
 
 ---
 
-## 1. franka-hdf5-v1 概览
+## 1. franka-hdf5-v2 概览
 
-`franka-hdf5-v1` 是录制阶段的**冻结中间格式**，定义在仓库根 `franka_hdf5_schema.py`。
+`franka-hdf5-v2` 是录制阶段的**冻结中间格式**（Phase D 升级自 v1），定义在仓库根 `franka_hdf5_schema.py`。
 
-- `SCHEMA_VERSION = "franka-hdf5-v1"`
+- `SCHEMA_VERSION = "franka-hdf5-v2"`
 - `JOINT_DOF = 7`，`EE_DIM = 6`（`[x, y, z, rx, ry, rz]`），`GRIPPER_MAX_M = 0.08`
 - 一个 `.h5` 文件 = 一条 episode。
 - 写出方：`scripts/core/hdf5_writer.py::write_episode`；校验方：`validate_episode`；消费方：`scripts/tools/hdf5_to_lerobot{,_v21}.py`。
 
 > 改 schema 必须 bump `SCHEMA_VERSION`，并同步 writer / validator / 两个转换器 / 对应 tests。
 
-约定：除图像 dataset 外，**所有数值 dataset 均为 `float64`**；时间戳来自 `time.monotonic()`，严格单调递增。
+约定：除图像 dataset 外，**所有数值 dataset 均为 `float64`**；时间戳来自 `time.monotonic()`（arm/effector）或 RealSense 硬件戳回归映射到 monotonic 秒域（camera hw_timestamp）。
+
+### v2 相对 v1 的主要变更
+
+| 变更点 | v1 | v2 |
+|---|---|---|
+| 共用时间戳 | `observations/timestamp(N,1)` | **删除**，N 改由 `action/timestamp.shape[0]` 确定 |
+| arm/effector/camera 各模态 | timestamp(N,) 副本 | timestamp(N,) + **stale(N,) bool**（独立） |
+| camera/{cn} | 仅 timestamp | + **hw_timestamp(N,) float64**（RealSense 硬件戳，映射至 monotonic 秒域） |
+| state_hifreq | joints/joint_vel/pose/timestamp/poly_ts | + **wrench(M,6) float64**（Phase F 实填，M=0 合规） |
+| 可扩展字段 | 无 | depth/tactile **validate-if-present** |
+| state_hifreq 实填 | M=0 占位 | Phase D 240Hz 实填（spike-a 分支 A） |
 
 ---
 
 ## 2. HDF5 group / dataset 完整 schema
 
-设 `N` = 帧数，`M` = 高频状态采样数（当前为 0，Phase D 填）。
+设 `N` = 帧数（由 `action/timestamp.shape[0]` 决定），`M` = 高频状态采样数（Phase D 实填，≈240×episode_sec）。
 
 ### infos/ —— 元信息
 
 | 路径 | shape | dtype | 含义 |
 |---|---|---|---|
-| `infos/schema_version` | 标量 | bytes | 固定 `"franka-hdf5-v1"` |
+| `infos/schema_version` | 标量 | bytes | 固定 `"franka-hdf5-v2"` |
 | `infos/task_info/task_name` | 标量 | bytes | 任务名称 |
 | `infos/task_info/collection_frequency` | (2,) | float64 | `[target_fps, 实测平均 fps]` |
 | `infos/task_info/total_frames` | 标量 | int64 | 帧数 N |
@@ -44,40 +56,66 @@
 | `infos/camera_params` | （空 group） | — | 占位 |
 | `infos/calibration/oc2base_R` | (3, 3) | float64 | oc→base 标定旋转矩阵 |
 | `infos/calibration/quality` | 标量 | bytes | JSON 序列化的质量参数 dict |
-| `infos/calibration/vr_source` | 标量 | bytes | VR 来源标识（= `control_mode`，如 `unityvr`） |
+| `infos/calibration/vr_source` | 标量 | bytes | VR 来源标识（如 `unityvr`） |
 
 ### observations/ —— 观测
 
+#### arm 模态（独立时间戳）
+
 | 路径 | shape | dtype | 含义 |
 |---|---|---|---|
-| `observations/timestamp` | (N, 1) | float64 | 帧时间戳（`time.monotonic()`），严格单调递增 |
 | `observations/arm/joints` | (N, 7) | float64 | 7 关节位置（rad） |
-| `observations/arm/joint_vel` | (N, 7) | float64 | 7 关节速度；未接通时零填 |
+| `observations/arm/joint_vel` | (N, 7) | float64 | 7 关节速度 |
 | `observations/arm/pose` | (N, 6) | float64 | 末端位姿 `[x,y,z,rx,ry,rz]`（base 系） |
-| `observations/arm/timestamp` | (N,) | float64 | 同 `observations/timestamp` 一维副本 |
-| `observations/effector/position` | (N, 1) | float64 | 夹爪开度（米）= `position_norm × gripper_max_open` |
+| `observations/arm/timestamp` | (N,) | float64 | arm 模态独立软件戳（`time.monotonic()`）；非递减 |
+| `observations/arm/stale` | (N,) | bool | 该帧 arm 数据是否为上帧补填（True = 陈旧） |
+
+#### effector 模态（独立时间戳）
+
+| 路径 | shape | dtype | 含义 |
+|---|---|---|---|
+| `observations/effector/position` | (N, 1) | float64 | 夹爪开度（米） |
 | `observations/effector/position_norm` | (N, 1) | float64 | 夹爪开度归一化 `[0,1]` |
 | `observations/effector/type` | (N,) | vlen bytes | 每帧固定 `b"gripper"` |
-| `observations/effector/timestamp` | (N,) | float64 | 时间戳一维副本 |
-| `observations/camera/rgb/{cam}/images` | (N,) | vlen uint8 | 每帧 1 个 JPEG 编码字节串 |
-| `observations/camera/rgb/{cam}/timestamp` | (N,) | float64 | 时间戳一维副本 |
-| `observations/state_hifreq/joints` | (M, 7) | float64 | 高频关节位置（当前 M=0 占位） |
+| `observations/effector/timestamp` | (N,) | float64 | effector 模态独立软件戳；非递减 |
+| `observations/effector/stale` | (N,) | bool | 该帧 effector 是否为上帧补填 |
+
+#### camera 模态（每相机独立时间戳 + 硬件戳）
+
+| 路径 | shape | dtype | 含义 |
+|---|---|---|---|
+| `observations/camera/rgb/{cam}/images` | (N,) | vlen uint8 | 每帧 1 个 JPEG 编码字节串（RGB→BGR→imencode） |
+| `observations/camera/rgb/{cam}/timestamp` | (N,) | float64 | 相机软件戳（`time.monotonic()`）；非递减 |
+| `observations/camera/rgb/{cam}/stale` | (N,) | bool | 该帧图像是否为上帧补填 |
+| `observations/camera/rgb/{cam}/hw_timestamp` | (N,) | float64 | RealSense 硬件戳（global_time 域经线性回归映射到 monotonic 秒域）；Phase D spike-b A 实填 |
+
+> 相机分组 `{cam}`：当前为 `wrist_image` 与 `exterior_image`（或 `wrist`/`exterior`）。
+> `hw_timestamp` 映射：RealSense `frame.get_timestamp()` 返回毫秒级绝对时间，经启动时线性回归换算为 monotonic 秒域后写入。
+
+#### state_hifreq 模态（240Hz 独立长度 M）
+
+| 路径 | shape | dtype | 含义 |
+|---|---|---|---|
+| `observations/state_hifreq/joints` | (M, 7) | float64 | 高频关节位置 |
 | `observations/state_hifreq/joint_vel` | (M, 7) | float64 | 高频关节速度 |
 | `observations/state_hifreq/pose` | (M, 6) | float64 | 高频末端位姿 |
-| `observations/state_hifreq/timestamp` | (M,) | float64 | 高频采样时间戳 |
+| `observations/state_hifreq/timestamp` | (M,) | float64 | 高频采样时间戳（monotonic，严格递增） |
 | `observations/state_hifreq/poly_ts` | (M,) | float64 | polymetis 侧时间戳 |
+| `observations/state_hifreq/wrench` | (M, 6) | float64 | 力/力矩（Phase F 实填，M=0 时合规） |
 
-> 相机分组 `{cam}`：录制时取自 `robot.cameras.keys()`，当前为 `wrist_image` 与 `exterior_image`。图像存为 JPEG 编码后的变长 uint8（编码在录制循环 `_encode_jpg` 中完成：RGB→BGR→`cv2.imencode('.jpg')`）。
->
-> `state_hifreq` 当前是 writer 写入的全 0 占位空数组（M=0），Phase D 高频采集接通后才填实数据。
+> M=0 时所有 state_hifreq dataset shape 均为 `(0, *)` 或 `(0,)`，合规。
+
+#### 可扩展字段（validate-if-present）
+
+depth/tactile 字段存在时才校验，缺失不报错（Phase F 实填）。
 
 ### action/ —— 动作
 
 | 路径 | shape | dtype | 含义 |
 |---|---|---|---|
 | `action/delta_ee_pose` | (N, 6) | float64 | 末端位姿增量 `[dx,dy,dz,drx,dry,drz]`（base 系） |
-| `action/gripper_cmd` | (N, 1) | float64 | 夹爪指令（来自 `gripper_cmd_bin`） |
-| `action/timestamp` | (N,) | float64 | 时间戳一维副本 |
+| `action/gripper_cmd` | (N, 1) | float64 | 夹爪指令 |
+| `action/timestamp` | (N,) | float64 | 动作时间戳（monotonic，严格递增，**定义 N**） |
 
 ---
 
@@ -85,52 +123,48 @@
 
 `validate_episode(path)` 返回 violations 列表（空 = 合格）。`write_episode` 写盘后立即调用，不合规抛 `RuntimeError`。校验项：
 
-1. `infos/schema_version` 存在且 == `"franka-hdf5-v1"`。
+1. `infos/schema_version` 存在且 == `"franka-hdf5-v2"`。
 2. 必需 group 齐全：`infos`、`infos/calibration`、`observations`、`observations/arm`、`observations/effector`、`observations/camera`、`observations/state_hifreq`、`action`。
-3. `observations/timestamp` 存在（缺失直接返回）；以其首维定 `N`。
-4. 逐 dataset 校验 **shape 精确匹配** 且 **dtype == float64**：
-   - `observations/timestamp (N,1)`、`arm/joints (N,7)`、`arm/joint_vel (N,7)`、`arm/pose (N,6)`、`arm/timestamp (N,)`；
-   - `effector/position (N,1)`、`effector/position_norm (N,1)`、`effector/timestamp (N,)`；
-   - `action/delta_ee_pose (N,6)`、`action/gripper_cmd (N,1)`、`action/timestamp (N,)`。
-5. `observations/effector/type` 存在。
-6. `observations/state_hifreq/joints` 存在；以其首维定 `M`，校验 `state_hifreq` 各 dataset shape/dtype（`joints (M,7)`、`joint_vel (M,7)`、`pose (M,6)`、`timestamp (M,)`、`poly_ts (M,)`）。
+3. `action/timestamp` 存在且为一维 float64；以其首维定 `N`。
+4. 逐模态校验 **shape 精确匹配** 且 dtype 正确：
+   - arm：`joints(N,7)`、`joint_vel(N,7)`、`pose(N,6)`、`timestamp(N,)` float64、`stale(N,)` bool
+   - effector：`position(N,1)`、`position_norm(N,1)`、`timestamp(N,)` float64、`stale(N,)` bool、`type` 存在
+   - camera/{cn}：`images(N,)` vlen uint8、`timestamp(N,)` float64、`stale(N,)` bool、`hw_timestamp(N,)` float64
+   - action：`delta_ee_pose(N,6)`、`gripper_cmd(N,1)` float64
+5. `observations/camera/rgb` 存在且至少含 1 个相机子组。
+6. state_hifreq：`joints(M,7)`、`joint_vel(M,7)`、`pose(M,6)`、`timestamp(M,)`、`poly_ts(M,)`、`wrench(M,6)` float64（M=0 合规）。
 7. `infos/calibration/oc2base_R` 存在、shape == `(3,3)`、dtype == float64。
-8. `observations/timestamp` 严格单调递增（`N>=2` 时任意 `diff <= 0` 即违规）。
+8. 时间戳单调性：
+   - `action/timestamp`：**严格递增**（N≥2）
+   - arm/effector/camera `timestamp`：**非递减**（N≥2，stale 允许相等）
+   - `state_hifreq/timestamp`：**严格递增**（M≥2）
 
 ---
 
 ## 4. State / Action 维度约定
 
-转换器把 hdf5 字段映射为 LeRobot 的 `observation.state` / `action` 向量（见 `scripts/tools/hdf5_lerobot_map.py`）。
+转换器输出与 realman 数据集完全对齐（见 `scripts/tools/hdf5_lerobot_map.py`）。
 
-### Action —— 7D
-
-`ACTION_KEYS` 顺序（与 numpy 列序一致）：
+### Observation State —— 14D（realman 布局）
 
 ```
-delta_ee_pose.x, delta_ee_pose.y, delta_ee_pose.z,
-delta_ee_pose.rx, delta_ee_pose.ry, delta_ee_pose.rz,
-gripper_cmd_bin
+joint_1_rad ... joint_7_rad,              # 索引 0-6   ：7 关节位置
+gripper_open,                              # 索引 7     ：夹爪归一化开度
+eef_pos_x_m, eef_pos_y_m, eef_pos_z_m,   # 索引 8-10  ：末端位置
+eef_rot_euler_x_rad, ..., eef_rot_euler_z_rad  # 索引 11-13 ：末端姿态
 ```
 
-= 6 维末端位姿增量 + 1 维夹爪指令。来源：hdf5 `action/delta_ee_pose` (6,) 拼 `action/gripper_cmd` (1,)。
+数据来源：`observations/arm/joints(N,7)` → joint_1..7；`observations/effector/position_norm(N,1)` → gripper_open；`observations/arm/pose(N,6)` → eef_pos_xyz + eef_rot_euler_xyz。
 
-### Observation State —— 14D
+### Action —— 14D（next-state 语义）
 
-`OBS_STATE_KEYS`（native layout）顺序：
+字段名与 `observation.state` 完全相同，数值 = next-state：
+- `action[i] = observation.state[i+1]`（i < N-1）
+- `action[N-1] = observation.state[N-1]`（末帧复制）
 
-```
-joint_1.pos ... joint_7.pos,           # 索引 0-6   ：7 关节位置
-ee_pose.x, ee_pose.y, ee_pose.z,        # 索引 7-9   ：末端位置
-ee_pose.rx, ee_pose.ry, ee_pose.rz,     # 索引 10-12 ：末端姿态
-gripper_norm                            # 索引 13    ：夹爪归一化开度
-```
+**不使用** hdf5 的 `action/delta_ee_pose`（原始增量保留在 hdf5，lerobot 转换不消费）。
 
-= 7 关节 + 6 末端位姿 + 1 夹爪。来源：hdf5 `observations/arm/joints` (7,) + `observations/arm/pose` (6,) + `observations/effector/position_norm` (1,)。
-
-> **realman layout**（`hdf5_to_lerobot_v21.py --state-layout realman`）：仅重排列序为 `joints(0-6) + gripper(7) + ee_pose(8-13)` 并改用 realman 命名（`joint_{i}_rad` / `gripper_open` / `eef_pos_*` / `eef_rot_euler_*`）。action 恒 7D 不变。
-
-LeRobot frame dict 键：`"action"` (float32, 7,)、`"observation.state"` (float32, 14,)、`"observation.images.{cam}"` (uint8 HWC)、`"task"` (str)。
+依据：实测 realman 数据集 `mean|action[i]-state[i+1]|=0.0`（action 本质就是 next-state）。
 
 ---
 
@@ -146,22 +180,22 @@ python scripts/tools/hdf5_to_lerobot.py \
     --root <out_dir> --task "任务描述"
 ```
 
-流程：用首个合规 episode 定 features（含实际图像 H/W）→ `LeRobotDataset.create()` → 逐 episode `validate_episode` 校验（不合规跳过并 warn）→ 逐帧 `add_frame` → `save_episode`。依赖 franka2 本机 lerobot（v3.0）。
-
 ### 5.2 hdf5_to_lerobot_v21.py → LeRobot v2.1
 
 ```bash
 python scripts/tools/hdf5_to_lerobot_v21.py \
     --in-dir <hdf5_dir> --out <out_dir> \
-    --fps 30 --task "任务描述" --robot-type franka --state-layout native
+    --fps 30 --task "任务描述" --robot-type franka
 ```
 
-独立实现，**不依赖任何版本 lerobot**。模块结构：
+独立实现，不依赖任何版本 lerobot。输出与 realman 数据集逐字段对齐（14D state + 14D next-state action）。
 
-- `v21_meta`：构建 `meta/info.json`、`tasks.jsonl`、`episodes.jsonl`、`episodes_stats.jsonl`。
-- `v21_parquet`：episode 帧写入 `data/chunk-000/episode_NNNNNN.parquet`（state/action + 5 元列，无图像列）。
-- `v21_video`：episode 视频导出（ffmpeg `libx264` `yuv420p`，同 realman 实测参数；始终用 libx264 规避 SVT-AV1 <32px 崩溃；原子写 `.mp4.tmp` → `os.replace`）。
-- `convert`：串联 meta/parquet/video。`fps` 必须为整数；不合规 episode 预校验跳过、不分配输出索引；通过校验但处理失败则 fail-loud 中止；首个合规 episode 定相机名与尺寸，后续 episode 校验一致性。
+可选的离线对齐步骤（以图像戳为锚做线性插值 + SLERP）：
+
+```bash
+python scripts/tools/align_offline.py \
+    --in <ep.h5> --out <aligned_dir> --on-stale interpolate
+```
 
 ---
 
@@ -170,14 +204,32 @@ python scripts/tools/hdf5_to_lerobot_v21.py \
 | 维度 | LeRobot v3.0（`hdf5_to_lerobot.py`） | LeRobot v2.1（`hdf5_to_lerobot_v21.py`） |
 |---|---|---|
 | 产出方式 | franka2 本机 lerobot 库直转 | 独立实现，不依赖 lerobot |
-| meta 文件 | `tasks.parquet` / `episodes/` / `stats.json` | `info.json` / `tasks.jsonl` / `episodes.jsonl` / `episodes_stats.jsonl` |
+| meta 文件 | `tasks.parquet` / `episodes/` / `stats.json` | `info.json` / `tasks.jsonl` / `episodes.jsonl` |
 | 数据文件 | `file-NNN.parquet`（chunk 分组） | `data/chunk-000/episode_NNNNNN.parquet` |
 | 视频 | `videos/{key}/chunk/` | `videos/chunk-000/observation.images.{cam}/` |
-| 互通性 | lerobot 对 `codebase_version` 强校验，**v3.0 与 v2.1 不互通** | 同左 |
-| 适用管线 | franka2 本机训练 / 可视化 | 既有 RoboCOIN `visualize_dataset` / realman 参考集 / GR00T `modality.json` |
-| state layout | native（OBS_STATE_KEYS 原序） | `--state-layout` 可选 `native` / `realman` |
+| 互通性 | **v3.0 与 v2.1 不互通** | 同左 |
+| 适用管线 | franka2 本机训练 / 可视化 | RoboCOIN / realman 参考集 / GR00T |
+| action 语义 | 14D next-state | 14D next-state（与 v3.0 一致） |
 
-> 用户既有训练/可视化管线均为 v2.1。v3.0 转换器保留产 v3.0 不改；需要 v2.1 时用独立 v2.1 转换器。
+---
+
+## 7. v1→v2 迁移工具
+
+对已有 v1 数据，使用 `scripts/tools/migrate_v1_to_v2.py` 离线迁移：
+
+```bash
+python scripts/tools/migrate_v1_to_v2.py \
+    --in <episode_v1.h5> \
+    --out <episode_v2.h5>
+```
+
+迁移逻辑：
+- `schema_version` 改 `franka-hdf5-v2`
+- 共用戳 `observations/timestamp(N,1)` → 各模态独立 `timestamp(N,)`
+- 新增各模态 `stale(N,) = False`（v1 无缺帧概念）
+- 新增 camera `hw_timestamp = timestamp`（v1 无真硬件戳，用软件戳占位）
+- 新增 `state_hifreq/wrench = zeros(M,6)`（M=0 时 shape=(0,6)）
+- 迁移后自动调用 `validate_episode` 自检
 
 ---
 

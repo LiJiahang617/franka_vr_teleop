@@ -1,6 +1,6 @@
 # 系统架构与原理
 
-> Franka 数采系统（Route B）—— Quest VR 世界系遥操 Franka，录制 `franka-hdf5-v1`，转 LeRobot 数据集。
+> Franka 数采系统（Route B）—— Quest VR 世界系遥操 Franka，录制 `franka-hdf5-v2`，转 LeRobot 数据集。
 
 ## 目录
 
@@ -20,18 +20,18 @@
 
 本仓库（`lerobot_franka_teleop`）是 Franka Research 3 机械臂的**遥操作数据采集系统**。当前主线为 **Route B**：
 
-> **Route B = Quest VR 世界系遥操 Franka → 录制 `franka-hdf5-v1` → 转 LeRobot 数据集**
+> **Route B = Quest VR 世界系遥操 Franka → 录制 `franka-hdf5-v2` → 转 LeRobot 数据集**
 
 与历史方案（主从同构关节映射 / SpaceMouse / Oculus 头显系）相比，Route B 的核心特征：
 
 - **世界系遥操**：Quest 控制器位姿在 Unity 世界系下解算，与头显朝向无关。用户戴头显面朝机械臂 base +X 方向，长按 Meta 键重置世界系即可（±几度可接受，无需 SVD 标定）。
-- **中间格式 `franka-hdf5-v1`**：录制阶段先写自定义 HDF5 schema（冻结契约），与 LeRobot 版本解耦；再由独立转换器产出 LeRobot 数据集。
+- **中间格式 `franka-hdf5-v2`**：录制阶段先写自定义 HDF5 schema（冻结契约），与 LeRobot 版本解耦；再由独立转换器产出 LeRobot 数据集。
 - **采集与落盘解耦**：录制循环只采帧，异步后台线程串行写盘 + 校验，背压有界。
 
 全链路：
 
 ```
-数据采集（VR 遥操 + 录制）  →  franka-hdf5-v1 (.h5)  →  转换器  →  LeRobot 数据集（v3.0 或 v2.1）  →  可视化 / 训练
+数据采集（VR 遥操 + 录制）  →  franka-hdf5-v2 (.h5)  →  转换器  →  LeRobot 数据集（v3.0 或 v2.1）  →  可视化 / 训练
 ```
 
 ---
@@ -40,7 +40,7 @@
 
 ```
 lerobot_franka_teleop/
-├── franka_hdf5_schema.py          # franka-hdf5-v1 schema 契约 + validate_episode（仓库根 loose 模块）
+├── franka_hdf5_schema.py          # franka-hdf5-v2 schema 契约 + validate_episode（仓库根 loose 模块）
 ├── setup.py                       # 主包安装 + console_scripts 入口
 ├── NOTICE.md                      # 第三方代码出处声明
 │
@@ -74,7 +74,7 @@ lerobot_franka_teleop/
 │   ├── lessons/                   # 踩坑教训
 │   ├── architecture.md            # 本文件
 │   ├── development-guide.md       # 开发说明
-│   ├── data-format.md             # franka-hdf5-v1 schema 说明
+│   ├── data-format.md             # franka-hdf5-v2 schema 说明
 │   └── README.md                  # docs 索引
 └── assets/                        # 图片（说明文档用图）
 ```
@@ -174,7 +174,7 @@ Franka 实时控制由 [Polymetis](https://polymetis-docs.github.io/) 提供。P
                                 │
                 ┌───────────────┴────────────────┐
                 ▼  后台单线程 _save_loop          │  录制循环继续下一条
-        write_episode()  → 写 .h5 (franka-hdf5-v1)
+        write_episode()  → 写 .h5 (franka-hdf5-v2)
         validate_episode()  → schema 自检，不合规抛错
                 │
                 ▼
@@ -197,9 +197,9 @@ Franka 实时控制由 [Polymetis](https://polymetis-docs.github.io/) 提供。P
 
 | 模块 | 作用 |
 |---|---|
-| `run_record_hdf5.py` | **录制主入口（终端键盘模式）**。解析 cfg → 构造 robot/teleop → 预检门 → 键盘监听 → `run_episodes` 录制循环 → `AsyncEpisodeSaver` 异步落盘，写 `franka-hdf5-v1`。 |
+| `run_record_hdf5.py` | **录制主入口（终端键盘模式）**。解析 cfg → 构造 robot/teleop → 预检门 → 键盘监听 → `run_episodes` 录制循环 → `AsyncEpisodeSaver` 异步落盘，写 `franka-hdf5-v2`。 |
 | `record_params.py` | 录制超参纯函数（可单测、无硬件依赖）：`resolve_record_fps`（fps 单一来源）、`extract_joint_vel`、`realsense_fps`（float→int）、`parse_reset_config`（严格 bool 解析防 yaml 引号陷阱）、`resolve_record_overrides`（CLI None 仅覆盖）。 |
-| `hdf5_writer.py` | `write_episode` 模块级落盘函数 + `HDF5EpisodeWriter` 类。按 `franka-hdf5-v1` 缓冲帧、整体写盘、末尾 `validate_episode` 自检。同步/异步路径共用同一实现。 |
+| `hdf5_writer.py` | `write_episode` 模块级落盘函数 + `HDF5EpisodeWriter` 类。按 `franka-hdf5-v2` 缓冲帧、整体写盘、末尾 `validate_episode` 自检。同步/异步路径共用同一实现。 |
 | `async_saver.py` | `AsyncEpisodeSaver`：有界队列 + 后台单线程。`submit()` 入队即返回；队列满抛 `QueueFullError`（不静默丢）；`close()` 无超时阻塞等排空（数据零丢优先）。 |
 | `preflight.py` | §11.2 数据预检门：夹爪健康/homing 预检 + 图像色彩通道序预检。纯判据函数离线可测，硬件 IO 由注入的 probe 回调封装。 |
 | `episode_keyboard.py` | `EpisodeDecider`：把 lerobot 键盘 events 翻译为 keep/discard/stop 决策。headless 时安全降级为计时保存。 |
@@ -267,7 +267,7 @@ Franka 实时控制由 [Polymetis](https://polymetis-docs.github.io/) 提供。P
 录制配置：`scripts/config/record_cfg_unityvr.yaml`（Route B 用），字段分组：
 
 - `record`：`repo_id` / `fps`（录制频率单一来源）/ `reset_between_episodes` / `control_mode: unityvr` / `out_dir`（hdf5 输出目录）/ `color_preflight`。
-- `record.depth` / `record.state_hifreq`：占位至 Phase D，当前不采集。
+- `record.depth` / `record.state_hifreq`：Phase D 已接通（state_hifreq 240Hz 实填，depth 留 Phase F）。
 - `record.teleop.unityvr_config`：`pose_scaler` / `channel_signs` / `oc2base_path` / `robot_port: 4242` / `pos_axis_gain` / `rot_axis_gain`。
 - `record.robot`：`ip`（NUC，`127.0.0.1`）/ `use_gripper` / `gripper_max_open`（franka hand 0.0801m）/ `execute_mode: ee_pose`。
 - `record.task`：`description` / `num_episodes`。
@@ -284,7 +284,7 @@ Franka 实时控制由 [Polymetis](https://polymetis-docs.github.io/) 提供。P
 
 | 决策 | 理由 |
 |---|---|
-| **中间格式 `franka-hdf5-v1`** | 录制与 LeRobot 版本解耦。`franka_hdf5_schema.py` 为冻结契约，改 schema 必须 bump `SCHEMA_VERSION` 并同步 writer/validator/转换器。 |
+| **中间格式 `franka-hdf5-v2`** | 录制与 LeRobot 版本解耦。`franka_hdf5_schema.py` 为冻结契约，改 schema 必须 bump `SCHEMA_VERSION` 并同步 writer/validator/转换器。 |
 | **采集与落盘解耦 + 异步队列** | 录制循环只采帧不写盘，避免 IO 抖动破坏帧率；后台单线程串行落盘保证写顺序。 |
 | **预检门前置** | 夹爪丢 homing / 色彩反色等问题在开录前约 10s 拦截，拒绝"录完才发现报废"。 |
 | **fps 单一来源** | `resolve_record_fps` 统一相机 fps / 循环节拍 / hdf5 `target_fps`，杜绝三处不一致。 |

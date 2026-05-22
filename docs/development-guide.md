@@ -74,9 +74,9 @@ cd /home/ubuntu/Desktop/jhli/lerobot_franka_teleop
 python -m pytest tests/ -q
 ```
 
-当前共 **397 个用例**。覆盖范围：schema 校验、hdf5 writer（同步/异步）、async saver、preflight（夹爪/色彩）、record params、record loop、episode keyboard、unityvr mapping、vr align、unity vr reader、v21 转换器（meta/parquet/video/structure-diff/cli）、路径一致性、import 顺序守门、record_cfg yaml 解析等。
+当前共 **602 个用例**（Phase A-E 基线 397 + Phase D 新增 205）。覆盖范围：schema 校验、hdf5 writer（同步/异步）、async saver、preflight（夹爪/色彩）、record params、record loop、episode keyboard、unityvr mapping、vr align、unity vr reader、v21 转换器（meta/parquet/video/structure-diff/cli）、路径一致性、import 顺序守门、record_cfg yaml 解析等。
 
-新增/修改纯逻辑代码时**必须**补充对应 `tests/test_*.py`，并保证 397（或新增后总数）全绿。
+新增/修改纯逻辑代码时**必须**补充对应 `tests/test_*.py`，并保证 602（或新增后总数）全绿。
 
 ---
 
@@ -104,7 +104,7 @@ python -m pytest tests/ -q
 
 ## 5. schema 修改规范
 
-`franka-hdf5-v1` 是**冻结契约**，多方并行依赖。修改 schema 时：
+`franka-hdf5-v2` 是**冻结中间格式**（Phase D 升级自 v1），多方并行依赖。修改 schema 时：
 
 1. **bump 版本** —— 改 `franka_hdf5_schema.py` 的 `SCHEMA_VERSION`（如 `franka-hdf5-v2`）。
 2. **同步消费方** —— 至少同步以下三处，缺一即产/读不一致：
@@ -175,6 +175,8 @@ bash debug/franka_clean_restart.sh   # 清理 → 起臂 → 验 → 起 zerorpc
 | `2026-05-20-preflight-gripper-span-verdict.md` | 夹爪预检正解判据：用多目标 width 整体跨度 `max-min>0.02`，禁相邻差 `>0.01` 假阴性判据 |
 | `2026-05-20-v21-loadability-franka2-probe.md` | v2.1 加载性 franka2 探测取舍 |
 | `2026-05-22-flask-ui-no-cache-and-js-newline.md` | Flask 响应必须加 `Cache-Control: no-cache` 头（防 stale UI）；Python 三引号字符串内 JS `\n` 变真换行炸 SyntaxError，HTML 模板放外部文件规避 |
+| `2026-05-22-schema-v1-to-v2-bump.md` | schema v1→v2 bump 全消费方协调清单：11 个测试文件直接依赖 schema，任何一个未同步就是违纪律红线；N 的定义来源从 observations/timestamp 改为 action/timestamp |
+| `2026-05-23-phaseD-sync-refactor.md` | Phase D 同步重构 8 条经验：zerorpc 单线程约束（5→3 线程），hw_timestamp 必须映射回 monotonic 秒域，vlen uint8 必须 copy 防 buffer 复用脏写，转换器 action=next-state 语义 |
 
 其他常见陷阱：
 
@@ -182,6 +184,9 @@ bash debug/franka_clean_restart.sh   # 清理 → 起臂 → 验 → 起 zerorpc
 - **CLI 覆盖用 `is None`**：禁 `cli or cfg`，否则 `0`/`""`/`False` 等 falsy 值被误判覆盖。
 - **延迟 import**：硬件依赖（franka/lerobot 真包）放函数内 import，避免测试/CI 加载时崩。
 - **deepcopy 时序**：异步保存的 payload 必须在 buffer 复用前 `deepcopy`，图像编码必须在 deepcopy 前完成。
+- **zerorpc 单线程约束**：zerorpc client 非线程安全，同一 client 绝不在多线程中并发调用；同一端口（4242）的所有 RPC 调用必须串行（用 `threading.Lock()`）。
+- **hw_timestamp 量纲陷阱**：RealSense `get_timestamp()` 返回毫秒级绝对时间，与 `time.monotonic()` 秒级相对时间量级不符，插值前必须经线性回归换算到 monotonic 秒域。
+- **vlen bytes buffer 复用**：`np.asanyarray(realsense_frame)` 可能返回视图，下一帧 pipeline 复用 buffer 后内容被脏写；凡写入队列/HDF5 的 ndarray 必须确认 `flags.owndata=True`（用 `np.array(...)`）。
 
 ---
 
