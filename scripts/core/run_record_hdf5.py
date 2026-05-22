@@ -340,8 +340,8 @@ def main():
                     help="oc2base_R .npy 路径（缺失则用单位矩阵）")
     a = ap.parse_args()
 
-    # 延迟 import 硬件依赖（RecordConfig 来自 run_record，需 lerobot 真实包）
-    from run_record import RecordConfig
+    # 延迟 import 硬件依赖（RecordConfig 来自 record_config，需 lerobot 真实包）
+    from record_config import RecordConfig
 
     with open(a.config) as fh:
         raw = yaml.safe_load(fh)

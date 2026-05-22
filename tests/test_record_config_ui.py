@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_RR_PATH = os.path.join(_REPO, "scripts/core/run_record.py")
+_RR_PATH = os.path.join(_REPO, "scripts/core/record_config.py")
 
 
 def _fake_module(name, **attrs):
@@ -116,12 +116,12 @@ def _load_run_record():
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
 
-    saved = {k: sys.modules.pop(k, None) for k in ["run_record"]}
+    saved = {k: sys.modules.pop(k, None) for k in ["record_config"]}
     sys.modules.update(mocks)
     try:
-        spec = importlib.util.spec_from_file_location("run_record", _RR_PATH)
+        spec = importlib.util.spec_from_file_location("record_config", _RR_PATH)
         mod = importlib.util.module_from_spec(spec)
-        sys.modules["run_record"] = mod
+        sys.modules["record_config"] = mod
         spec.loader.exec_module(mod)
         return mod
     finally:
