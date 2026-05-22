@@ -258,10 +258,26 @@ def _make_state_hifreq_read_fn(robot, zerorpc_lock):
                 ee_pose = zerorpc_client.robot_get_ee_pose()
                 # polymetis 接口暂不转发 poly_ts；用 monotonic 占位（Task 9 验证）
                 poly_ts = _time.monotonic()
+            joints_arr = np.array(joint_pos, dtype=np.float64)
+            jvel_arr = np.array(joint_vel, dtype=np.float64)
+            ee_arr = np.array(ee_pose, dtype=np.float64)
+            # Imp4：形状校验，防止真机返回意外维度静默写坏 hdf5
+            if joints_arr.shape != (7,):
+                raise ValueError(
+                    f"robot_get_joint_positions 返回形状 {joints_arr.shape}，期望 (7,)"
+                )
+            if jvel_arr.shape != (7,):
+                raise ValueError(
+                    f"robot_get_joint_velocities 返回形状 {jvel_arr.shape}，期望 (7,)"
+                )
+            if ee_arr.shape != (6,):
+                raise ValueError(
+                    f"robot_get_ee_pose 返回形状 {ee_arr.shape}，期望 (6,)"
+                )
             return {
-                "joints": np.array(joint_pos, dtype=np.float64),
-                "joint_vel": np.array(joint_vel, dtype=np.float64),
-                "ee_pose": np.array(ee_pose, dtype=np.float64),
+                "joints": joints_arr,
+                "joint_vel": jvel_arr,
+                "ee_pose": ee_arr,
                 "poly_ts": poly_ts,
             }
         return _read_hifreq_zerorpc
@@ -520,7 +536,13 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                 f"（目标 {hifreq_rate}Hz × {max_sec}s ≈ {hifreq_rate * max_sec:.0f}）"
             )
         else:
-            log.warning("[HIFREQ] state_hifreq collector 无采样（可能录制时间太短）")
+            _last_err = hifreq_collector.last_error
+            if _last_err is not None:
+                log.warning(
+                    "[HIFREQ] state_hifreq collector 无采样（last_error: %s）", _last_err
+                )
+            else:
+                log.warning("[HIFREQ] state_hifreq collector 无采样（可能录制时间太短）")
 
     return buf, state_hifreq_block
 

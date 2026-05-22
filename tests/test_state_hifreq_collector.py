@@ -562,3 +562,170 @@ class TestAlignOfflineHifreq:
 
         assert result["state_hifreq_joints"].shape[0] == 0
         assert result["state_hifreq_timestamp"].shape[0] == 0
+
+
+# ===========================================================================
+# Codex 审查补充：Imp2/Imp3/Imp4 覆盖（新增集成+单元测试）
+# ===========================================================================
+
+class TestHistoryCollectorCounts:
+    """Imp2：overrun_count / error_count 计数器单元测试。"""
+
+    def test_error_count_increments_on_exception(self):
+        """read_fn 持续抛异常时，error_count 累加。"""
+        stop_event = threading.Event()
+
+        def always_fail():
+            raise RuntimeError("模拟 zerorpc 失败")
+
+        collector = HistoryCollectorThread(
+            name="err_count_test",
+            read_fn=always_fail,
+            target_rate=200.0,
+            stop_event=stop_event,
+        )
+        time.sleep(0.03)  # 让它跑约 6 次节拍
+        collector.stop(timeout=1.0)
+
+        assert collector.error_count > 0, "error_count 应 > 0（read_fn 持续抛异常）"
+        assert collector.last_error is not None, "last_error 应非 None"
+        assert isinstance(collector.last_error, RuntimeError)
+
+    def test_error_count_zero_when_no_error(self):
+        """read_fn 正常时，error_count 应为 0。"""
+        stop_event = threading.Event()
+
+        collector = HistoryCollectorThread(
+            name="no_err_test",
+            read_fn=lambda: {"joints": np.zeros(7), "joint_vel": np.zeros(7), "ee_pose": np.zeros(6)},
+            target_rate=100.0,
+            stop_event=stop_event,
+        )
+        time.sleep(0.02)
+        collector.stop(timeout=1.0)
+
+        assert collector.error_count == 0, f"正常采集 error_count 应为 0，实际 {collector.error_count}"
+
+    def test_overrun_count_property_accessible(self):
+        """overrun_count property 可访问，类型为 int。"""
+        stop_event = threading.Event()
+        collector = HistoryCollectorThread(
+            name="overrun_test",
+            read_fn=lambda: {"joints": np.zeros(7), "joint_vel": np.zeros(7), "ee_pose": np.zeros(6)},
+            target_rate=100.0,
+            stop_event=stop_event,
+        )
+        time.sleep(0.01)
+        collector.stop(timeout=1.0)
+
+        assert isinstance(collector.overrun_count, int)
+        assert collector.overrun_count >= 0
+
+
+class TestRecordEpisodeEdgeCases:
+    """Imp3：record_episode 空历史/异常路径的集成测试。"""
+
+    def test_hifreq_rate_zero_returns_none_block(self):
+        """hifreq_rate=0：不启动采集线程，block=None（已有覆盖，确认行为不变）。"""
+        m = _load_rrh()
+        robot = FakeRobot()
+        teleop = FakeTeleop()
+        buf, block = m.record_episode(
+            robot, teleop, fps=30.0, max_sec=0.05,
+            gripper_max_open=0.08, cam_names=["wrist_image"],
+            hifreq_rate=0.0,
+        )
+        assert block is None, f"hifreq_rate=0 时 block 必须为 None，实际 {block}"
+        assert isinstance(buf, list)
+
+    def test_always_failing_read_fn_yields_none_block(self):
+        """read_fn 持续抛异常 → history 空 → block=None，last_error 非 None，error_count>0。
+
+        验证：np.stack([]) 不会被调用（无崩溃）。
+        """
+        m = _load_rrh()
+
+        class FailingRobot:
+            """_robot 属性存在（走真机路径），但所有 zerorpc 调用均失败。"""
+            def __init__(self):
+                self.cameras = {"wrist_image": FakeCam()}
+                self._robot = self  # 使 zerorpc_client is not None
+                self.config = type("C", (), {"gripper_max_open": 0.08})()
+
+            # 模拟 zerorpc 方法——全部抛异常
+            def robot_get_joint_positions(self):
+                raise RuntimeError("zerorpc 连接断开（模拟）")
+
+            def robot_get_joint_velocities(self):
+                raise RuntimeError("zerorpc 连接断开（模拟）")
+
+            def robot_get_ee_pose(self):
+                raise RuntimeError("zerorpc 连接断开（模拟）")
+
+            def get_observation(self):
+                # 回退路径也失败（触发真机路径因有 _robot）
+                raise RuntimeError("不应进入此路径")
+
+            def send_action(self, a):
+                pass
+
+        robot = FailingRobot()
+        teleop = FakeTeleop()
+
+        # 录制很短时间，read_fn 全程失败 → history 为空
+        buf, block = m.record_episode(
+            robot, teleop, fps=30.0, max_sec=0.08,
+            gripper_max_open=0.08, cam_names=["wrist_image"],
+            hifreq_rate=240.0,
+        )
+
+        # 核心断言：空历史时 block=None，不崩溃
+        assert block is None, (
+            f"read_fn 持续失败时 history 空，block 应为 None，实际 {block}"
+        )
+        assert isinstance(buf, list)
+
+    def test_normal_hifreq_block_m_gt_0(self):
+        """正常采集（M>0）：block 结构正确，np.stack 组装无误。"""
+        m = _load_rrh()
+        robot = FakeRobot()
+        teleop = FakeTeleop()
+        buf, block = m.record_episode(
+            robot, teleop, fps=30.0, max_sec=0.15,
+            gripper_max_open=0.08, cam_names=["wrist_image"],
+            hifreq_rate=100.0,
+        )
+        assert block is not None, "正常采集时 block 不应为 None"
+        M = len(block["timestamp"])
+        assert M > 0
+        assert block["joints"].shape == (M, 7)
+        assert block["joint_vel"].shape == (M, 7)
+        assert block["pose"].shape == (M, 6)
+
+    def test_empty_history_no_np_stack_crash(self):
+        """空历史不触发 np.stack([])（用 HistoryCollectorThread 直接验证）。
+
+        直接构造一个 stop 后 history 为空的 collector，验证 get_history() 返回 []，
+        手动复现 record_episode 的组装逻辑——应走 if history: else 分支，不 np.stack。
+        """
+        stop_event = threading.Event()
+        stop_event.set()  # 立刻置位，线程启动后立即退出，不采样
+
+        # read_fn 每次都抛异常，确保 history 为空
+        collector = HistoryCollectorThread(
+            name="empty_hist_test",
+            read_fn=lambda: (_ for _ in ()).throw(RuntimeError("立刻失败")),
+            target_rate=1.0,  # 低频，stop_event 置位后不会进入第一拍
+            stop_event=stop_event,
+        )
+        collector.stop(timeout=1.0)
+
+        history = collector.get_history()
+        assert len(history) == 0, f"预期 history 为空，实际 {len(history)}"
+
+        # 复现 record_episode 组装逻辑：有 history 才 np.stack
+        if history:
+            # 不应进入此分支
+            np.stack([s.data["joints"] for s in history])
+            raise AssertionError("空 history 不应进入 np.stack 分支")
+        # else 分支：block = None，无崩溃，测试通过

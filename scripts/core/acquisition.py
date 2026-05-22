@@ -241,6 +241,12 @@ class HistoryCollectorThread:
         self._history: list[HistorySample] = []
         self._last_error: Optional[Exception] = None
 
+        # Imp2：overrun / error 计数（供真机诊断 240Hz 达标率 / 锁竞争）
+        self._overrun_count: int = 0  # 节拍超时（sleep_dur <= 0）次数
+        self._error_count: int = 0    # read_fn 异常次数
+        # 限频 warning：记录上次打 warning 的时间，每秒最多一条
+        self._last_warning_time: float = 0.0
+
         self._thread = threading.Thread(
             target=self._loop,
             name=f"HistoryCollector-{name}",
@@ -262,9 +268,21 @@ class HistoryCollectorThread:
         """最后一次 read_fn 抛出的异常（None 表示无异常）。"""
         return self._last_error
 
-    def get_history(self) -> list[HistorySample]:
-        """返回截止当前所有累积采样的快照（copy），线程安全。
+    @property
+    def overrun_count(self) -> int:
+        """节拍超时（sleep_dur <= 0）累计次数，用于诊断 240Hz 是否达标。"""
+        return self._overrun_count
 
+    @property
+    def error_count(self) -> int:
+        """read_fn 抛出异常的累计次数，用于诊断采集异常率。"""
+        return self._error_count
+
+    def get_history(self) -> list[HistorySample]:
+        """返回截止当前所有累积采样的快照（浅拷贝），线程安全。
+
+        返回的是新的 list 对象（外部修改列表不影响内部），但列表中的
+        HistorySample 对象及其 `.data` 字段不深拷贝（浅拷贝语义）。
         建议在 stop() + join() 之后调用，以获取完整历史。
         """
         with self._lock:
@@ -330,11 +348,18 @@ class HistoryCollectorThread:
 
             except Exception as exc:
                 self._last_error = exc
-                logger.warning(
-                    "HistoryCollectorThread '%s' read_fn 抛出异常（将在下一拍重试）: %s",
-                    self.name,
-                    exc,
-                )
+                self._error_count += 1
+                # 限频 warning：每秒最多记一条，避免 240Hz 持续异常刷屏
+                now_warn = time.monotonic()
+                if now_warn - self._last_warning_time >= 1.0:
+                    logger.warning(
+                        "HistoryCollectorThread '%s' read_fn 抛出异常（将在下一拍重试，"
+                        "累计 %d 次）: %s",
+                        self.name,
+                        self._error_count,
+                        exc,
+                    )
+                    self._last_warning_time = now_warn
 
             next_tick += interval
             now = time.monotonic()
@@ -342,4 +367,6 @@ class HistoryCollectorThread:
             if sleep_dur > 0:
                 self._stop_event.wait(sleep_dur)
             else:
+                # 节拍超时：累加 overrun 计数，重置 next_tick 到当前时刻
+                self._overrun_count += 1
                 next_tick = time.monotonic()
