@@ -24,14 +24,18 @@ def build_app(controller=None) -> Flask:
 
     Args:
         controller: RecorderController 实例（后续 Task 接入），
-                    None 时只做静态路由，便于 TDD 离线测试。
+                    None 时控制类路由退化为 503，便于 TDD 离线测试。
 
     Returns:
         配置好 after_request cache 头和基础路由的 Flask app。
     """
     app = Flask(__name__)
-    # 保存 controller 引用，后续路由（Task 2-6）通过 app.controller 访问
-    app.controller = controller  # type: ignore[attr-defined]
+
+    def _require_controller():
+        """controller=None 时返回 503 JSON，否则返回 None（表示 controller 可用）。"""
+        if controller is None:
+            return jsonify({"ok": False, "error": "controller unavailable"}), 503
+        return None
 
     @app.after_request
     def _no_cache(resp):
@@ -51,36 +55,58 @@ def build_app(controller=None) -> Flask:
     @app.route("/api/start", methods=["POST"])
     def _api_start():
         """请求开始录制。命令入队 'start'，不直接调机器人（守坑 7）。"""
-        controller.start_recording()
+        err = _require_controller()
+        if err is not None:
+            return err
+        ok = controller.start_recording()
+        if not ok:
+            return jsonify({"ok": False, "error": "command queue full"}), 503
         return jsonify({"ok": True})
 
     @app.route("/api/save", methods=["POST"])
     def _api_save():
         """保存当前 episode（等价键盘 → keep）。写 exit_early=True。"""
+        err = _require_controller()
+        if err is not None:
+            return err
         controller.save_episode()
         return jsonify({"ok": True})
 
     @app.route("/api/discard", methods=["POST"])
     def _api_discard():
         """丢弃当前 episode（等价键盘 ← discard）。写 rerecord+exit_early=True。"""
+        err = _require_controller()
+        if err is not None:
+            return err
         controller.discard_episode()
         return jsonify({"ok": True})
 
     @app.route("/api/stop", methods=["POST"])
     def _api_stop():
         """停止整个录制会话（等价键盘 Esc stop）。写 stop_recording+exit_early=True。"""
+        err = _require_controller()
+        if err is not None:
+            return err
         controller.stop_recording()
         return jsonify({"ok": True})
 
     @app.route("/api/home", methods=["POST"])
     def _api_home():
         """请求机械臂回 Home。命令入队 'home'，不直接调机器人（守坑 7）。"""
-        controller.go_home()
+        err = _require_controller()
+        if err is not None:
+            return err
+        ok = controller.go_home()
+        if not ok:
+            return jsonify({"ok": False, "error": "command queue full"}), 503
         return jsonify({"ok": True})
 
     @app.route("/api/status", methods=["GET"])
     def _api_status():
         """返回录制器当前状态快照（JSON）。"""
+        err = _require_controller()
+        if err is not None:
+            return err
         return jsonify(controller.status_snapshot())
 
     # ---------- 修订 B：负载标定占位路由 ----------

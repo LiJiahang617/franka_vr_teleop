@@ -37,8 +37,8 @@ class RecorderController:
     - save_episode    → exit_early=True             （= → 键 keep）
     - discard_episode → rerecord_episode=True + exit_early=True  （= ← 键 discard）
     - stop_recording  → stop_recording=True + exit_early=True    （= Esc 键 stop）
-    - start_recording → 命令队列入 "start"（不直接调机器人）
-    - go_home         → 命令队列入 "home"（不直接调机器人）
+    - start_recording → 命令队列入 "start"（不直接调机器人），成功返回 True，队列满返回 False
+    - go_home         → 命令队列入 "home"（不直接调机器人），成功返回 True，队列满返回 False
 
     Attributes:
         _events: 与 EpisodeDecider 共享的 events dict。
@@ -109,18 +109,35 @@ class RecorderController:
 
     # ---------- 命令队列动作（不直接调机器人，守坑 7） ----------
 
-    def start_recording(self) -> None:
-        """请求开始录制（写命令队列 'start'，Task 5 录制器线程消费）。"""
-        self._cmd_q.put_nowait("start")
-        self._log("UI start_recording: 命令入队 'start'")
+    def start_recording(self) -> bool:
+        """请求开始录制（写命令队列 'start'，Task 5 录制器线程消费）。
 
-    def go_home(self) -> None:
+        Returns:
+            True：命令成功入队；False：队列已满，命令未入队。
+        """
+        try:
+            self._cmd_q.put_nowait("start")
+            self._log("UI start_recording: 命令入队 'start'")
+            return True
+        except queue.Full:
+            self._log("UI start_recording: 命令队列已满，丢弃 'start'")
+            return False
+
+    def go_home(self) -> bool:
         """请求机械臂回 Home（写命令队列 'home'，Task 5 录制器线程消费）。
 
         不直接调 robot.reset (zerorpc)，守坑 7（避免与采集线程并发）。
+
+        Returns:
+            True：命令成功入队；False：队列已满，命令未入队。
         """
-        self._cmd_q.put_nowait("home")
-        self._log("UI go_home: 命令入队 'home'")
+        try:
+            self._cmd_q.put_nowait("home")
+            self._log("UI go_home: 命令入队 'home'")
+            return True
+        except queue.Full:
+            self._log("UI go_home: 命令队列已满，丢弃 'home'")
+            return False
 
     # ---------- 状态/帧缓存 ----------
 

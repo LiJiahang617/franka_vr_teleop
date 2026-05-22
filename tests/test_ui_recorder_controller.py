@@ -100,3 +100,61 @@ def test_controller_lock_protects_concurrent_episode_count():
     for t in ts:
         t.join()
     assert c.status_snapshot()["episode_count"] == 4000
+"""
+Task 2 修复新增测试（追加到 test_ui_recorder_controller.py 末尾）。
+
+验证：
+- start_recording() 在队列满时返回 False，未满时返回 True
+- go_home() 在队列满时返回 False，未满时返回 True
+"""
+import importlib.util
+import os
+import queue
+
+_P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_s = importlib.util.spec_from_file_location(
+    "recorder_controller", os.path.join(_P, "scripts/ui/recorder_controller.py")
+)
+rc = importlib.util.module_from_spec(_s)
+_s.loader.exec_module(rc)
+
+
+def _make():
+    events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
+    c = rc.RecorderController(events=events)
+    return c, events
+
+
+# ==================== 返回值语义 ====================
+
+def test_start_recording_returns_true_on_success():
+    """start_recording() 队列未满时返回 True。"""
+    c, _ = _make()
+    result = c.start_recording()
+    assert result is True
+
+
+def test_start_recording_returns_false_on_full_queue():
+    """start_recording() 队列满时返回 False（不抛异常）。"""
+    c, _ = _make()
+    # 替换为 maxsize=1 的满队列
+    c._cmd_q = queue.Queue(maxsize=1)
+    c._cmd_q.put_nowait("dummy")
+    result = c.start_recording()
+    assert result is False
+
+
+def test_go_home_returns_true_on_success():
+    """go_home() 队列未满时返回 True。"""
+    c, _ = _make()
+    result = c.go_home()
+    assert result is True
+
+
+def test_go_home_returns_false_on_full_queue():
+    """go_home() 队列满时返回 False（不抛异常）。"""
+    c, _ = _make()
+    c._cmd_q = queue.Queue(maxsize=1)
+    c._cmd_q.put_nowait("dummy")
+    result = c.go_home()
+    assert result is False

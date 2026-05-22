@@ -147,3 +147,140 @@ def test_api_payload_calib_no_side_effects():
     assert events == {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
     # 命令队列为空
     assert ctl._cmd_q.empty()
+"""
+Task 2 修复新增测试（追加到 test_ui_routes.py 末尾）。
+
+验证：
+- controller=None 时控制类路由返回 503 JSON ok=False
+- /api/ping 和 /api/payload-calib 不受 controller=None 影响
+- 命令队列满时 /api/start 和 /api/home 返回 503 JSON 含 "queue full" 语义
+"""
+import importlib.util
+import os
+import queue
+
+# 使用绝对路径确保无论从哪里运行都正确
+_P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+
+_cp = importlib.util.spec_from_file_location(
+    "control_panel", os.path.join(_P, "scripts/ui/control_panel.py")
+)
+cp = importlib.util.module_from_spec(_cp)
+_cp.loader.exec_module(cp)
+
+_rc = importlib.util.spec_from_file_location(
+    "recorder_controller", os.path.join(_P, "scripts/ui/recorder_controller.py")
+)
+rc = importlib.util.module_from_spec(_rc)
+_rc.loader.exec_module(rc)
+
+
+def _none_client():
+    """构造 controller=None 的 test_client（离线测试 503 退化行为）。"""
+    app = cp.build_app(controller=None)
+    return app.test_client()
+
+
+def _full_queue_client():
+    """构造命令队列满（maxsize=1 预先填充 1 条）的 test_client。"""
+    events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
+    ctl = rc.RecorderController(events=events)
+    # 将队列替换为 maxsize=1 并预先塞满
+    ctl._cmd_q = queue.Queue(maxsize=1)
+    ctl._cmd_q.put_nowait("dummy")
+    app = cp.build_app(controller=ctl)
+    return app.test_client(), ctl
+
+
+# ==================== controller=None 时返回 503 ====================
+
+def test_none_controller_start_returns_503():
+    """controller=None 时 POST /api/start 返回 503 且 JSON ok=False。"""
+    c = _none_client()
+    r = c.post("/api/start")
+    assert r.status_code == 503
+    j = r.get_json()
+    assert j is not None and j.get("ok") is False
+
+
+def test_none_controller_save_returns_503():
+    """controller=None 时 POST /api/save 返回 503 且 JSON ok=False。"""
+    c = _none_client()
+    r = c.post("/api/save")
+    assert r.status_code == 503
+    j = r.get_json()
+    assert j is not None and j.get("ok") is False
+
+
+def test_none_controller_discard_returns_503():
+    """controller=None 时 POST /api/discard 返回 503 且 JSON ok=False。"""
+    c = _none_client()
+    r = c.post("/api/discard")
+    assert r.status_code == 503
+    j = r.get_json()
+    assert j is not None and j.get("ok") is False
+
+
+def test_none_controller_stop_returns_503():
+    """controller=None 时 POST /api/stop 返回 503 且 JSON ok=False。"""
+    c = _none_client()
+    r = c.post("/api/stop")
+    assert r.status_code == 503
+    j = r.get_json()
+    assert j is not None and j.get("ok") is False
+
+
+def test_none_controller_home_returns_503():
+    """controller=None 时 POST /api/home 返回 503 且 JSON ok=False。"""
+    c = _none_client()
+    r = c.post("/api/home")
+    assert r.status_code == 503
+    j = r.get_json()
+    assert j is not None and j.get("ok") is False
+
+
+def test_none_controller_status_returns_503():
+    """controller=None 时 GET /api/status 返回 503 且 JSON ok=False。"""
+    c = _none_client()
+    r = c.get("/api/status")
+    assert r.status_code == 503
+    j = r.get_json()
+    assert j is not None and j.get("ok") is False
+
+
+def test_none_controller_ping_still_200():
+    """controller=None 时 GET /api/ping 仍返回 200（不依赖 controller）。"""
+    c = _none_client()
+    r = c.get("/api/ping")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is True
+
+
+def test_none_controller_payload_calib_still_200():
+    """controller=None 时 POST /api/payload-calib 仍返回 200（不依赖 controller）。"""
+    c = _none_client()
+    r = c.post("/api/payload-calib")
+    assert r.status_code == 200
+
+
+# ==================== 命令队列满时返回 503 ====================
+
+def test_full_queue_start_returns_503():
+    """命令队列满时 POST /api/start 返回 503 且 JSON body 含 'queue full' 语义。"""
+    c, _ = _full_queue_client()
+    r = c.post("/api/start")
+    assert r.status_code == 503
+    j = r.get_json()
+    assert j is not None and j.get("ok") is False
+    # error 字段须含 "queue full" 语义词
+    assert "queue" in j.get("error", "").lower()
+
+
+def test_full_queue_home_returns_503():
+    """命令队列满时 POST /api/home 返回 503 且 JSON body 含 'queue full' 语义。"""
+    c, _ = _full_queue_client()
+    r = c.post("/api/home")
+    assert r.status_code == 503
+    j = r.get_json()
+    assert j is not None and j.get("ok") is False
+    assert "queue" in j.get("error", "").lower()
