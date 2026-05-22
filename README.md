@@ -44,6 +44,19 @@ python scripts/core/run_record_hdf5.py --config scripts/config/record_cfg_unityv
 
 录制结果为 `franka-hdf5-v1` 格式的 `.h5` 文件，默认输出到 `/home/ubuntu/Desktop/jhli/_hdf5_episodes`。
 
+#### 可选：Web UI 模式录制
+
+先在 `scripts/config/record_cfg_unityvr.yaml` 的 `record.ui` 段设置 `enabled: true`，再启动 UI 入口：
+
+```bash
+python scripts/core/run_record_hdf5_ui.py --config scripts/config/record_cfg_unityvr.yaml
+```
+
+浏览器访问 `http://<franka2-ip>:5055` 通过按钮控制录制（保存 / 丢弃 / 停止 / 回 Home）。
+
+> **安全提示**：`ui.host: 0.0.0.0` = 局域网可访问；仅在私网部署，不暴露公网；
+> 按钮直接触发真机动作，**急停在手，随时可按**。
+
 ### 4. 转换为 LeRobot 数据集
 
 转 **LeRobot v3.0**（franka2 本机 lerobot 直转）：
