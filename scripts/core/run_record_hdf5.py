@@ -214,14 +214,30 @@ def _make_robot_state_read_fn(robot, zerorpc_lock=None):
 def _make_camera_read_fn(cam):
     """构造单路相机采集线程的 read_fn。
 
+    Task 8-A：支持 RealsenseHwWrapper（read() 返回 (rgb, hw_ts_ms) 元组）
+    和普通相机（read() 返回 ndarray）两种接口，统一包装为 (rgb, hw_ts_or_None) 元组。
+
     Args:
-        cam: 相机对象，需有 read() 方法返回 RGB ndarray。
+        cam: 相机对象，需有 read() 方法。
+             若 getattr(cam, 'HW_WRAPPER', False) 为 True（RealsenseHwWrapper），
+             cam.read() 应返回 (rgb_ndarray, hw_ts_ms) 元组；
+             否则视为普通相机，cam.read() 返回 rgb_ndarray。
 
     Returns:
-        Callable[[], np.ndarray]：返回原始 RGB ndarray（不编码）。
+        Callable[[], tuple[np.ndarray | None, float | None]]：
+        返回 (rgb, hw_ts_or_None) 元组；hw_ts 单位毫秒（float），普通相机为 None。
     """
-    def _read():
-        return cam.read()
+    is_hw_wrapper = getattr(cam, "HW_WRAPPER", False)
+
+    if is_hw_wrapper:
+        def _read():
+            # RealsenseHwWrapper.read() 已返回 (rgb, hw_ts_ms) 元组
+            return cam.read()
+    else:
+        def _read():
+            # 普通相机：read() 返回 ndarray，包装为 (rgb, None) 元组
+            return cam.read(), None
+
     return _read
 
 
@@ -462,15 +478,23 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
             cams = {}
             cam_ts = {}
             cam_stale_dict = {}
+            cam_hw_ts = {}
             for cn in cam_names:
                 if cn in snap:
-                    img, c_ts, c_stale = snap[cn]
+                    data, c_ts, c_stale = snap[cn]
                 else:
                     # 相机线程无 read() 或未采到帧：占位
-                    img, c_ts, c_stale = None, now, True
+                    data, c_ts, c_stale = None, now, True
+
+                # Task 8-A：_make_camera_read_fn 统一返回 (rgb, hw_ts_or_None) 元组
+                # hw_ts 单位毫秒（float）；普通相机为 None（fallback 软件戳）
+                if isinstance(data, tuple) and len(data) == 2:
+                    img, hw_ts_val = data
+                else:
+                    img, hw_ts_val = data, None
 
                 if img is not None and isinstance(img, np.ndarray):
-                    # frame_observer 在 _encode_jpg 之前调用原始 RGB（守门测试约束）
+                    # frame_observer 在 _encode_jpg 之前调用原始 RGB（守门测试约束不变）
                     if frame_observer is not None:
                         frame_observer(cn, img)
                     cams[cn] = _encode_jpg(img)
@@ -479,6 +503,8 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
 
                 cam_ts[cn] = c_ts
                 cam_stale_dict[cn] = c_stale
+                # hw_ts 有效时写真硬件戳（毫秒）；否则 fallback 软件戳（秒，与 c_ts 单位同）
+                cam_hw_ts[cn] = hw_ts_val if hw_ts_val is not None else c_ts
 
             buf.append(dict(
                 ts=now,  # Minor1：帧时刻用 snapshot 时刻，非编码后时刻
@@ -486,7 +512,7 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                 arm_ts=arm_ts,
                 effector_ts=effector_ts,
                 cam_ts=cam_ts,
-                cam_hw_ts={cn: cam_ts[cn] for cn in cam_names},  # Task 8 实填真硬件戳；此处软件戳占位
+                cam_hw_ts=cam_hw_ts,  # Task 8-A 实填真硬件戳；普通相机 fallback 软件戳
                 # v2 stale 字段（各模态独立，多线程时可能非零）
                 arm_stale=arm_stale,
                 effector_stale=effector_stale,

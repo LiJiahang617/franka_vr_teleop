@@ -186,6 +186,56 @@ def _slerp_modal(
 
 
 # ---------------------------------------------------------------------------
+# Task 8-A 辅助：hw_timestamp 有效性检测与锚时间轴选择
+# ---------------------------------------------------------------------------
+
+# 线性相关判据（与 spike_realsense_hw_timestamp.py 决策树一致）
+_HW_TS_R2_THRESHOLD = 0.9999
+
+
+def _select_anchor_ts(
+    sw_ts: np.ndarray,
+    hw_ts: np.ndarray | None,
+) -> np.ndarray:
+    """选择锚时间轴：hw_ts 线性相关达标时返回 hw_ts，否则 fallback sw_ts。
+
+    Args:
+        sw_ts: 软件时间戳（秒，monotonic），shape (N,)。
+        hw_ts: 硬件时间戳（毫秒，global_time），shape (N,)，或 None（字段缺失）。
+
+    Returns:
+        锚时间轴 (N,) float64：hw_ts（毫秒）或 sw_ts（秒）。
+    """
+    if hw_ts is None or len(hw_ts) < 2:
+        return sw_ts
+
+    # 线性回归：hw_ts_s ≈ slope * sw_ts + intercept
+    # 中心化减少数值误差
+    hw_ts_s = hw_ts / 1000.0  # 毫秒 → 秒（与 sw_ts 单位统一后做回归）
+    sw_c = sw_ts - sw_ts[0]
+    hw_c = hw_ts_s - hw_ts_s[0]
+
+    A = np.vstack([sw_c, np.ones(len(sw_c))]).T
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(A, hw_c, rcond=None)
+    except np.linalg.LinAlgError:
+        return sw_ts
+
+    slope, intercept = float(coeffs[0]), float(coeffs[1])
+    hw_pred = slope * sw_c + intercept
+    ss_res = float(np.sum((hw_c - hw_pred) ** 2))
+    ss_tot = float(np.sum((hw_c - hw_c.mean()) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    if r2 > _HW_TS_R2_THRESHOLD:
+        # hw_ts 线性相关达标：用 hw_ts（毫秒单位）作为锚时间轴
+        return hw_ts.astype(np.float64)
+
+    # fallback：hw_ts 不可用
+    return sw_ts
+
+
+# ---------------------------------------------------------------------------
 # 核心对齐函数
 # ---------------------------------------------------------------------------
 
@@ -224,8 +274,17 @@ def align_by_image_timestamp(
         elif cam_anchor not in cam_names:
             raise ValueError(f"锚相机 {cam_anchor!r} 不存在，可用：{cam_names}")
 
-        anchor_ts = f[f"observations/camera/rgb/{cam_anchor}/timestamp"][...]
+        sw_ts_raw = f[f"observations/camera/rgb/{cam_anchor}/timestamp"][...]
         anchor_stale = f[f"observations/camera/rgb/{cam_anchor}/stale"][...]
+
+        # Task 8-A：优先用 hw_timestamp 作为锚时间轴（线性相关达标时）；否则 fallback sw_ts。
+        # 线性相关判据：hw_ts 与 sw_ts 线性回归 R² > 0.9999（与 spike 决策树一致）。
+        hw_ts_raw = None
+        hw_ts_key = f"observations/camera/rgb/{cam_anchor}/hw_timestamp"
+        if hw_ts_key in f:
+            hw_ts_raw = f[hw_ts_key][...]
+
+        anchor_ts = _select_anchor_ts(sw_ts_raw, hw_ts_raw)
 
         # --- 各模态原始数据 ---
         arm_ts = f["observations/arm/timestamp"][...]
