@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Franka 数采控制台</title>
+  <style>
+    /* ===== 基础重置 ===== */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ===== 页面背景（修订 A：深色渐变） ===== */
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(135deg, #0f1d34 0%, #1a2d4a 55%, #0d1e33 100%);
+      min-height: 100vh;
+      color: #e8eef6;
+      padding: 16px;
+    }
+
+    /* ===== 玻璃态卡片（修订 A：glass-card） ===== */
+    .glass-card {
+      background: rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    /* ===== 顶栏 ===== */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .topbar h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: #00d4ff;
+      letter-spacing: 0.5px;
+    }
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .ep-label {
+      color: #94a3b8;
+      font-size: 0.9rem;
+    }
+    .ep-count {
+      color: #00d4ff;
+      font-weight: 600;
+    }
+
+    /* ===== 状态徽章 ===== */
+    .badge {
+      display: inline-block;
+      padding: 4px 14px;
+      border-radius: 20px;
+      font-weight: 700;
+      font-size: 0.85rem;
+      letter-spacing: 0.5px;
+      transition: background 0.3s;
+    }
+    .badge-initializing, .badge-waiting { background: #475569; color: #e8eef6; }
+    .badge-recording                    { background: #ff6b6b; color: #fff; }
+    .badge-confirming                   { background: #fbbf24; color: #1a2d4a; }
+    .badge-saving                       { background: #00d4ff; color: #0f1d34; }
+    .badge-ready                        { background: #4ade80; color: #0f1d34; }
+
+    /* ===== 双相机预览区 ===== */
+    .cam-row {
+      display: flex;
+      gap: 16px;
+    }
+    .cam-panel {
+      flex: 1;
+    }
+    .cam-title {
+      font-size: 0.8rem;
+      color: #94a3b8;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .cam-panel img {
+      width: 100%;
+      max-width: 100%;
+      height: 220px;
+      object-fit: contain;
+      background: #0a1525;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      display: block;
+    }
+
+    /* ===== 下部三列 Grid ===== */
+    .bottom-grid {
+      display: grid;
+      grid-template-columns: 320px 1fr 320px;
+      gap: 16px;
+    }
+
+    /* ===== 卡片标题 ===== */
+    .card-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    /* ===== 按钮基础 ===== */
+    .btn {
+      display: inline-block;
+      width: 100%;
+      padding: 10px 16px;
+      margin-bottom: 8px;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
+      color: #fff;
+    }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+    .btn:active { transform: translateY(0); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    /* 语义色（修订 A） */
+    .btn-green  { background: linear-gradient(135deg, #4ade80, #22c55e); color: #0f1d34; }
+    .btn-cyan   { background: linear-gradient(135deg, #00d4ff, #0ea5e9); color: #0f1d34; }
+    .btn-red    { background: linear-gradient(135deg, #ff6b6b, #ef4444); }
+    .btn-yellow { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #0f1d34; }
+    /* 修订 B：负载标定 — 中性青色描边按钮 */
+    .btn-outline-cyan {
+      background: transparent;
+      border: 1.5px solid #00d4ff;
+      color: #00d4ff;
+      font-weight: 600;
+    }
+    .btn-outline-cyan:hover { background: rgba(0, 212, 255, 0.12); transform: translateY(-2px); }
+
+    /* ===== 状态面板 ===== */
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 0.9rem;
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: #94a3b8; }
+    .stat-value { color: #e8eef6; font-weight: 600; }
+    .stat-value.accent { color: #00d4ff; }
+
+    /* ===== 日志区 ===== */
+    #log {
+      background: #040d1a;
+      color: #4ade80;
+      font-family: "Fira Code", "Courier New", monospace;
+      font-size: 0.78rem;
+      padding: 10px;
+      border-radius: 8px;
+      max-height: 260px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    /* ===== 弹层（修订 B：负载标定引导） ===== */
+    #payload-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    #payload-modal.show { display: flex; }
+    #payload-modal-box {
+      background: rgba(10, 21, 37, 0.98);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(0, 212, 255, 0.3);
+      border-radius: 14px;
+      padding: 24px;
+      max-width: 480px;
+      width: 90%;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+    }
+    #payload-modal-title {
+      color: #00d4ff;
+      font-weight: 700;
+      font-size: 1rem;
+      margin-bottom: 12px;
+    }
+    #payload-modal-body {
+      color: #e8eef6;
+      font-size: 0.9rem;
+      line-height: 1.6;
+      margin-bottom: 16px;
+    }
+    #payload-modal-close {
+      background: linear-gradient(135deg, #00d4ff, #0ea5e9);
+      color: #0f1d34;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 20px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    /* ===== 响应式（修订 A） ===== */
+    @media (max-width: 1100px) {
+      .bottom-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 700px) {
+      .cam-row { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 顶栏 -->
+  <div class="glass-card topbar">
+    <h1>FRANKA 数采控制台</h1>
+    <div class="topbar-right">
+      <span class="ep-label">Episodes: <span id="ep_count" class="ep-count">0</span></span>
+      <span class="ep-label">FPS: <span id="fps" style="color:#4ade80;font-weight:700">--</span></span>
+      <span id="state-badge" class="badge badge-initializing">initializing</span>
+    </div>
+  </div>
+
+  <!-- 双相机预览 -->
+  <div class="glass-card">
+    <div class="card-title">相机预览</div>
+    <div class="cam-row">
+      <div class="cam-panel">
+        <div class="cam-title">Wrist 腕部相机</div>
+        <img id="cam-wrist_image" alt="wrist camera">
+      </div>
+      <div class="cam-panel">
+        <div class="cam-title">Exterior 外部相机</div>
+        <img id="cam-exterior_image" alt="exterior camera">
+      </div>
+    </div>
+  </div>
+
+  <!-- 下部三列 -->
+  <div class="bottom-grid">
+
+    <!-- 左列：控制区 -->
+    <div>
+      <!-- 录制控制卡片 -->
+      <div class="glass-card">
+        <div class="card-title">录制控制</div>
+        <button id="btn-start"   class="btn btn-green"  onclick="post('/api/start')">开始录制</button>
+        <button id="btn-save"    class="btn btn-cyan"   onclick="post('/api/save')">结束并保存</button>
+        <button id="btn-discard" class="btn btn-red"    onclick="post('/api/discard')">结束并丢弃</button>
+        <button id="btn-stop"    class="btn btn-red"    onclick="post('/api/stop')">停止会话</button>
+      </div>
+      <!-- 机械臂卡片（修订 B：含负载标定） -->
+      <div class="glass-card">
+        <div class="card-title">机械臂</div>
+        <button id="btn-home"    class="btn btn-yellow" onclick="post('/api/home')">回 Home</button>
+        <button id="btn-payload" class="btn btn-outline-cyan" onclick="triggerPayloadCalib()">负载标定</button>
+      </div>
+    </div>
+
+    <!-- 中列：状态面板 -->
+    <div class="glass-card">
+      <div class="card-title">实时状态</div>
+      <div class="stat-row">
+        <span class="stat-label">状态机</span>
+        <span id="state" class="stat-value accent">initializing</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Episode 计数</span>
+        <span class="stat-value"><span id="ep_count2">0</span></span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">当前帧数</span>
+        <span class="stat-value"><span id="frame_count">0</span></span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">FPS</span>
+        <span class="stat-value accent"><span id="fps2">--</span></span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">录制时长</span>
+        <span class="stat-value"><span id="duration">0.0</span> s</span>
+      </div>
+    </div>
+
+    <!-- 右列：日志区 -->
+    <div class="glass-card">
+      <div class="card-title">日志</div>
+      <pre id="log">(等待日志...)</pre>
+    </div>
+
+  </div>
+
+  <!-- 修订 B：负载标定引导弹层 -->
+  <div id="payload-modal">
+    <div id="payload-modal-box">
+      <div id="payload-modal-title">负载标定 — 操作引导</div>
+      <div id="payload-modal-body"></div>
+      <button id="payload-modal-close" onclick="closePayloadModal()">知道了</button>
+    </div>
+  </div>
+
+  <script>
+    /* ===== 状态机颜色映射 ===== */
+    var STATE_COLORS = {
+      initializing: 'badge-initializing',
+      waiting:      'badge-waiting',
+      recording:    'badge-recording',
+      confirming:   'badge-confirming',
+      saving:       'badge-saving',
+      ready:        'badge-ready'
+    };
+
+    /* ===== POST 辅助（cache:'no-store' 双保险） ===== */
+    function post(url) {
+      return fetch(url, { method: 'POST', cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .catch(function(e) { console.error('POST', url, e); });
+    }
+
+    /* ===== 状态轮询（约 30Hz） ===== */
+    function pollStatus() {
+      fetch('/api/status', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          /* 状态徽章 */
+          var badge = document.getElementById('state-badge');
+          var cls = STATE_COLORS[j.state] || 'badge-initializing';
+          badge.className = 'badge ' + cls;
+          badge.textContent = j.state;
+
+          /* 状态文本 */
+          document.getElementById('state').textContent = j.state;
+
+          /* 计数与 FPS */
+          var ep = j.episode_count !== undefined ? j.episode_count : 0;
+          var fps = j.fps !== undefined ? j.fps : '--';
+          document.getElementById('ep_count').textContent = ep;
+          document.getElementById('ep_count2').textContent = ep;
+          document.getElementById('fps').textContent = fps;
+          document.getElementById('fps2').textContent = fps;
+          document.getElementById('frame_count').textContent = j.frame_count || 0;
+          document.getElementById('duration').textContent = j.duration_sec ? j.duration_sec.toFixed(1) : '0.0';
+
+          /* 日志 */
+          var logs = j.log_tail || [];
+          document.getElementById('log').textContent = logs.join('\n');
+        })
+        .catch(function() {});
+    }
+
+    /* ===== 相机帧轮询（约 30Hz） ===== */
+    function pollCam(cam) {
+      fetch('/api/preview/' + cam, { cache: 'no-store' })
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(j) {
+          if (j && j.data_url) {
+            document.getElementById('cam-' + cam).src = j.data_url;
+          }
+        })
+        .catch(function() {});
+    }
+
+    /* ===== 修订 B：负载标定弹层 ===== */
+    function triggerPayloadCalib() {
+      fetch('/api/payload-calib', { method: 'POST', cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          var modal = document.getElementById('payload-modal');
+          document.getElementById('payload-modal-body').textContent = j.guidance || '请参考 Franka Desk 完成负载标定。';
+          modal.classList.add('show');
+        })
+        .catch(function(e) { console.error('payload-calib', e); });
+    }
+
+    function closePayloadModal() {
+      document.getElementById('payload-modal').classList.remove('show');
+    }
+
+    /* ===== 启动定时器 ===== */
+    setInterval(pollStatus, 33);
+    setInterval(function() { pollCam('wrist_image'); }, 33);
+    setInterval(function() { pollCam('exterior_image'); }, 33);
+  </script>
+</body>
+</html>

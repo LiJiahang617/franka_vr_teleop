@@ -12,7 +12,7 @@ Flask app 工厂函数。
 import os
 import importlib.util
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template
 
 # 负载标定占位路由的引导文案（修订 B）
 _PAYLOAD_CALIB_GUIDANCE = (
@@ -23,6 +23,8 @@ _PAYLOAD_CALIB_GUIDANCE = (
 
 # 动态加载同包 preview 模块（与其他模块保持一致的加载方式）
 _UI_DIR = os.path.dirname(os.path.abspath(__file__))
+# Jinja2 模板目录（Task 4：GET / 渲染控制面板 HTML）
+_TPL_DIR = os.path.join(_UI_DIR, "templates")
 _preview_spec = importlib.util.spec_from_file_location(
     "ui_preview", os.path.join(_UI_DIR, "preview.py")
 )
@@ -41,7 +43,7 @@ def build_app(controller=None) -> Flask:
     Returns:
         配置好 after_request cache 头和基础路由的 Flask app。
     """
-    app = Flask(__name__)
+    app = Flask(__name__, template_folder=_TPL_DIR)
 
     def _require_controller():
         """controller=None 时返回 503 JSON，否则返回 None（表示 controller 可用）。"""
@@ -61,6 +63,22 @@ def build_app(controller=None) -> Flask:
     def _ping():
         """烟测路由，验证 Flask 实例正常工作。"""
         return jsonify({"ok": True})
+
+    # ---------- Task 4：控制面板 HTML 页面 ----------
+
+    @app.route("/", methods=["GET"])
+    def _index():
+        """渲染控制面板 HTML 页面（外部模板文件，避免 Python 三引号 JS \\n 陷阱）。
+
+        模板 control_panel.html 位于 scripts/ui/templates/，包含：
+        - 玻璃态深色 CSS 风格（修订 A）
+        - 5 个控制按钮 + 负载标定按钮（修订 B）
+        - 双相机 img 槽位
+        - 约 30Hz setInterval 轮询（状态 + 相机预览）
+        - 所有 fetch 含 cache:'no-store' 双保险
+        Cache-Control 头由 @app.after_request 统一加（红线）。
+        """
+        return render_template("control_panel.html")
 
     # ---------- Task 2：录制控制路由 ----------
 
