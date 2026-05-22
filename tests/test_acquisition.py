@@ -6,8 +6,15 @@
 3. 独立 modality rate（不同线程各自节拍，互不影响）
 4. hub.snapshot 取最新读数（多帧后仍是最后一帧数据）
 5. stop_event + join 后线程退出无僵尸
+6. latest() 在有数据后始终返回最新缓存（不清空语义）
+7. snapshot 高频调用时模态不消失（stale 而非缺席）
+8. read_fn 抛异常时线程不崩、last_error 可查
+9. target_rate <= 0 时 __init__ raise ValueError
+10. stop() 返回 bool，join 超时记录 warning
+11. target_rate 公有 property
 """
 
+import logging
 import threading
 import time
 
@@ -106,23 +113,21 @@ def test_sensor_reading_ts_is_monotonic_from_latest():
 def test_hub_snapshot_stale_when_data_old():
     """snapshot(now) 中 now-ts > 2/rate 时，该模态 stale=True。"""
     stop = threading.Event()
-    # queue_maxsize=0 表示无界，线程持续填入数据，stop 后 queue 仍有数据
-    sensor = SensorThread("arm", lambda: 99, target_rate=10.0,
-                          queue_maxsize=0, stop_event=stop)
+    sensor = SensorThread("arm", lambda: 99, target_rate=10.0, stop_event=stop)
 
     # 等待线程至少产生一帧
     deadline = time.monotonic() + 1.0
-    while sensor._q.empty() and time.monotonic() < deadline:
+    while sensor.latest() is None and time.monotonic() < deadline:
         time.sleep(0.01)
 
-    # 停止线程（queue 中仍有数据）
+    # 停止线程（_latest 中仍有数据）
     sensor.stop(timeout=2.0)
 
     hub = AcquisitionHub({"arm": sensor})
     # now 设为 ts + 3 秒（极大），必然 stale（2/10 = 0.2s 阈值）
     snap = hub.snapshot(now=time.monotonic() + 3.0)
 
-    assert "arm" in snap, "模态应在 snapshot 中（queue 中仍有数据）"
+    assert "arm" in snap, "模态应在 snapshot 中（_latest 中仍有数据）"
     data, ts, stale = snap["arm"]
     assert stale is True, f"now-ts=3s >> 2/10=0.2s，期望 stale=True，得 {stale}"
     assert data == 99
@@ -189,11 +194,11 @@ def test_independent_modality_rates():
 
 
 def test_hub_snapshot_returns_latest_data():
-    """snapshot 应取 queue 中最新一帧，而不是最旧一帧。"""
+    """snapshot 应取最新一帧（_latest），而不是最旧一帧。"""
     # 用单调递增计数器：最新帧 data 值最大
     stop = threading.Event()
     read_fn, get_count = make_counter_read_fn()
-    sensor = SensorThread("arm", read_fn, target_rate=500.0, queue_maxsize=0, stop_event=stop)
+    sensor = SensorThread("arm", read_fn, target_rate=500.0, stop_event=stop)
 
     # 让线程充分运行，产生多帧
     time.sleep(0.2)
@@ -335,3 +340,226 @@ def test_sensor_reading_dataclass():
     r = SensorReading(data=[1, 2, 3], ts=1234.5)
     assert r.data == [1, 2, 3]
     assert r.ts == 1234.5
+
+
+# ---------------------------------------------------------------------------
+# Test 7（新）：latest() 在有数据后始终返回缓存（不清空语义）
+# ---------------------------------------------------------------------------
+
+
+def test_latest_returns_cached_after_stop():
+    """线程停止后多次调用 latest()，始终返回最后已知值（不变成 None）。"""
+    stop = threading.Event()
+    sensor = SensorThread("arm", lambda: 42, target_rate=100.0, stop_event=stop)
+
+    # 等线程产生至少一帧
+    deadline = time.monotonic() + 1.0
+    while sensor.latest() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    sensor.stop(timeout=2.0)
+
+    # 停止后多次调用，均应返回同一缓存值，不应变成 None
+    for _ in range(5):
+        r = sensor.latest()
+        assert r is not None, "latest() 在有数据后不应返回 None"
+        assert r.data == 42
+
+
+# ---------------------------------------------------------------------------
+# Test 8（新）：核心回归 — snapshot 高频调用时模态不消失
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_modality_never_disappears_after_first_read():
+    """关键回归：snapshot 调用频率高于采集频率时，模态不消失。
+
+    有过至少一帧后，后续 snapshot 总含该模态；
+    数据陈旧时 stale=True（而非缺席）。
+    """
+    stop = threading.Event()
+    # 低速传感器 2Hz，快速 snapshot 20次
+    sensor = SensorThread("slow_arm", lambda: 7, target_rate=2.0, stop_event=stop)
+
+    # 等第一帧到达
+    deadline = time.monotonic() + 2.0
+    while sensor.latest() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert sensor.latest() is not None, "应至少产生一帧"
+
+    hub = AcquisitionHub({"slow_arm": sensor})
+
+    # 以远高于采集频率的速度调用 snapshot
+    results = []
+    for _ in range(20):
+        snap = hub.snapshot(now=time.monotonic())
+        results.append("slow_arm" in snap)
+        time.sleep(0.01)  # 10ms 间隔 >> 2Hz 采集周期的 500ms
+
+    sensor.stop(timeout=2.0)
+
+    # 所有 snapshot 都应包含该模态（stale 但不缺席）
+    assert all(results), (
+        f"模态在 snapshot 中消失了！结果列表: {results}"
+    )
+
+
+def test_snapshot_stale_flag_when_high_frequency_polling():
+    """高频 snapshot 时，模态存在且较旧的帧标记为 stale=True。"""
+    stop = threading.Event()
+    sensor = SensorThread("sensor", lambda: 1, target_rate=1.0, stop_event=stop)
+
+    # 等第一帧
+    deadline = time.monotonic() + 2.0
+    while sensor.latest() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    sensor.stop(timeout=2.0)
+
+    hub = AcquisitionHub({"sensor": sensor})
+    # now 设得很远，stale 必然为 True
+    snap = hub.snapshot(now=time.monotonic() + 10.0)
+
+    assert "sensor" in snap, "停止后有缓存，模态不应缺席"
+    _, _, stale = snap["sensor"]
+    assert stale is True, "数据已陈旧，应标记 stale=True"
+
+
+# ---------------------------------------------------------------------------
+# Test 9（新）：read_fn 抛异常时线程不崩、last_error 可查
+# ---------------------------------------------------------------------------
+
+
+def test_thread_survives_read_fn_exception():
+    """read_fn 抛异常时，线程不崩溃，继续运行；last_error 记录异常。"""
+    stop = threading.Event()
+    call_count = [0]
+
+    def flaky_fn():
+        call_count[0] += 1
+        if call_count[0] <= 2:
+            raise RuntimeError(f"模拟错误 #{call_count[0]}")
+        return 99
+
+    sensor = SensorThread("flaky", flaky_fn, target_rate=100.0, stop_event=stop)
+
+    # 等线程在异常后继续跑，成功读到数据
+    deadline = time.monotonic() + 2.0
+    while sensor.latest() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    sensor.stop(timeout=2.0)
+
+    # 线程应在异常后继续运行并最终读到成功值
+    r = sensor.latest()
+    assert r is not None, "异常恢复后应有读数"
+    assert r.data == 99
+
+    # last_error 应记录最后一次异常
+    assert sensor.last_error is not None, "last_error 应记录异常"
+
+
+def test_thread_continues_after_exception_series():
+    """连续多次异常后线程仍不崩，is_alive() 为 True。"""
+    stop = threading.Event()
+    call_count = [0]
+
+    def always_fail_then_succeed():
+        call_count[0] += 1
+        if call_count[0] < 5:
+            raise ValueError("一直错")
+        return call_count[0]
+
+    sensor = SensorThread("unstable", always_fail_then_succeed, target_rate=200.0, stop_event=stop)
+
+    # 等线程跑一会儿（包含多次异常）
+    deadline = time.monotonic() + 1.0
+    while call_count[0] < 6 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert sensor.is_alive(), "多次异常后线程应仍存活"
+    sensor.stop(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Test 10（新）：target_rate <= 0 时 __init__ raise ValueError
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_target_rate_raises():
+    """target_rate <= 0 时，__init__ 应立即 raise ValueError。"""
+    with pytest.raises(ValueError, match="target_rate"):
+        SensorThread("bad", lambda: 1, target_rate=0.0)
+
+    with pytest.raises(ValueError, match="target_rate"):
+        SensorThread("bad", lambda: 1, target_rate=-1.0)
+
+
+# ---------------------------------------------------------------------------
+# Test 11（新）：stop() 返回 bool；target_rate 公有 property
+# ---------------------------------------------------------------------------
+
+
+def test_stop_returns_bool():
+    """stop() 应返回 bool，表示线程是否成功停止。"""
+    stop = threading.Event()
+    sensor = SensorThread("arm", lambda: 1, target_rate=100.0, stop_event=stop)
+
+    result = sensor.stop(timeout=2.0)
+    assert isinstance(result, bool), "stop() 应返回 bool"
+    assert result is True, "正常停止时应返回 True"
+
+
+def test_target_rate_property():
+    """SensorThread 应提供公有 target_rate property。"""
+    stop = threading.Event()
+    sensor = SensorThread("arm", lambda: 1, target_rate=30.0, stop_event=stop)
+
+    assert sensor.target_rate == 30.0, "target_rate property 应返回初始化值"
+    sensor.stop(timeout=2.0)
+
+
+def test_hub_snapshot_uses_public_target_rate():
+    """snapshot 中 stale 判断应通过公有 target_rate，不访问私有 _target_rate。"""
+    stop = threading.Event()
+    sensor = SensorThread("arm", lambda: 1, target_rate=10.0, stop_event=stop)
+
+    # 等一帧
+    deadline = time.monotonic() + 1.0
+    while sensor.latest() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    sensor.stop(timeout=2.0)
+
+    hub = AcquisitionHub({"arm": sensor})
+    # 仅验证 snapshot 能正常执行（不依赖私有属性）
+    snap = hub.snapshot(now=time.monotonic())
+    assert "arm" in snap
+
+
+# ---------------------------------------------------------------------------
+# Test 12（新）：stop_event.wait 替代 sleep — 低频传感器 stop 及时
+# ---------------------------------------------------------------------------
+
+
+def test_low_rate_stop_is_fast():
+    """低频（1Hz）传感器 stop() 时，不必等满一个 sleep 周期（约 1s）。
+
+    改用 stop_event.wait 后，stop 应在远小于一个完整 interval 的时间内完成。
+    """
+    stop = threading.Event()
+    sensor = SensorThread("low_rate", lambda: 1, target_rate=1.0, stop_event=stop)
+
+    # 等第一次 read 完成（进入 sleep 阶段）
+    deadline = time.monotonic() + 2.0
+    while sensor.latest() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    t0 = time.monotonic()
+    sensor.stop(timeout=3.0)
+    elapsed = time.monotonic() - t0
+
+    assert not sensor.is_alive(), "线程应已停止"
+    # 用 stop_event.wait，应在 0.5s 内响应（远小于 1Hz 的 1s 间隔）
+    assert elapsed < 0.5, f"低频 stop 应及时响应，实际耗时 {elapsed:.3f}s"
