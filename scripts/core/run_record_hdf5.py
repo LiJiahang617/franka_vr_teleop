@@ -136,7 +136,7 @@ def _encode_jpg(img: np.ndarray) -> np.ndarray:
 
 def record_episode(robot, teleop, fps: float, max_sec: float,
                    gripper_max_open: float, cam_names: list,
-                   *, stop_flag=None) -> list:
+                   *, stop_flag=None, frame_observer=None) -> list:
     """录制一个 episode，每 tick 收 action/obs 拼 frame 返回帧列表。
 
     图像在 _encode_jpg 中编码（cvtColor(RGB2BGR)->imencode），
@@ -151,6 +151,10 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
         cam_names: 相机名列表，需与写盘时 cam_names 一致
         stop_flag: 可选 callable()->bool，返回 True 时提前结束当前 ep  # Task4 中途中断预留, 当前未接线
                    （Task 4 键盘接入；本 Task 默认 None=按 max_sec 结束）
+        frame_observer: 可选 Callable[[str, np.ndarray], None]，每帧每路 cam
+                        在 _encode_jpg 之前调用，传入 (cam_name, rgb_ndarray)。
+                        默认 None=零行为变化（既有代码路径完全不变）。
+                        注意：observer 收到的是 obs[cn] 原始引用，勿在内部修改。
 
     Returns:
         list[dict]：采集的帧列表，每帧含 ts/joints/joint_vel/ee_pose/
@@ -206,6 +210,9 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
         for cn in cam_names:
             img = obs.get(cn)
             if img is not None and isinstance(img, np.ndarray):
+                # frame_observer 在 _encode_jpg 之前调用原始 RGB 数据（Task 5 hook）
+                if frame_observer is not None:
+                    frame_observer(cn, img)
                 cams[cn] = _encode_jpg(img)
             else:
                 # 占位（相机未就绪时）
@@ -233,7 +240,7 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
 def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
                  cam_names, out_dir, task_name, oc2base_R, vr_source,
                  episodes, decide, reset_fn=None, reset_wait=0.0,
-                 stop_flag=None):
+                 stop_flag=None, frame_observer=None):
     """episode 循环编排：录完→deepcopy→submit→新 buffer（非阻塞）。
 
     "采集"与"落盘"解耦：
@@ -275,10 +282,14 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
         stop_flag: 可选 callable()->bool，传给 record_episode 提前结束当前 ep
                    （Task 4 由 EpisodeDecider.episode_stop_flag() 提供；
                    None=按 episode_sec 计时结束，headless 安全）
+        frame_observer: 可选 Callable[[str, np.ndarray], None]，每帧每路 cam
+                        在编码前透传给 record_episode（Task 5 UI hook；
+                        默认 None=零行为变化，既有测试全绿守门）
     """
     for ep in range(episodes):
         buf = record_episode(robot, teleop, fps, episode_sec, gripper_max_open,
-                             cam_names, stop_flag=stop_flag)
+                             cam_names, stop_flag=stop_flag,
+                             frame_observer=frame_observer)
 
         action = decide(ep)
 

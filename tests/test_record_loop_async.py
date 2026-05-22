@@ -107,7 +107,7 @@ def test_payload_is_deep_isolated_from_buffer_mutation(tmp_path):
     # 记录 record_episode 最后一次返回的原始 buf 引用
     last_buf_ref = []
 
-    def fake_record_episode(robot, teleop, fps, max_sec, gripper_max_open, cam_names, *, stop_flag=None):
+    def fake_record_episode(robot, teleop, fps, max_sec, gripper_max_open, cam_names, *, stop_flag=None, frame_observer=None):
         buf = [
             {
                 "ts": 1.0,

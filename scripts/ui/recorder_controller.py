@@ -5,15 +5,18 @@ RecorderController：UI 与录制器之间的桥梁。
 - 持有 events dict（供 EpisodeDecider 消费，语义与终端键盘逐字等价）
 - 持有命令队列（start/home 走队列，由 Task 5 录制器主循环串行消费；守坑 7 不直接调 zerorpc）
 - 持有状态机（Task 1 的 StateMachine）
-- 线程安全：episode_count / latest_frames / log_tail 均在 _lock 下操作
-- 录制器线程在 Task 5 接入，本 Task 用 stub 占位
+- 线程安全：episode_count / latest_frames / log_tail / frame_count / duration_sec 均在 _lock 下操作
+- 录制器线程在 Task 5 接入（attach_record_args + start + _record_main）
 """
 import collections
 import importlib.util
+import logging
 import os
 import queue
 import threading
 from typing import Optional
+
+log = logging.getLogger("recorder_controller")
 
 import numpy as np
 
@@ -44,12 +47,16 @@ class RecorderController:
         _events: 与 EpisodeDecider 共享的 events dict。
         _sm: 状态机实例。
         _cmd_q: 命令队列（Task 5 录制器主循环消费）。
-        _lock: RLock，保护 _ep_count / _latest_frames / _log_tail。
+        _lock: RLock，保护 _ep_count / _latest_frames / _log_tail / _frame_count / _duration_sec。
         _ep_count: 已完成 episode 计数。
         _fps: 录制帧率（UI 状态显示用）。
         _log_tail: 近 200 条日志（环形缓冲）。
         _latest_frames: cam_name → ndarray RGB（Task 5 填充，Task 3 读取）。
-        _recorder_thread: 录制器线程（Task 5 接入，当前为 None）。
+        _recorder_thread: 录制器线程（Task 5 接入）。
+        _record_args: attach_record_args 保存的录制参数字典。
+        _should_stop: 后台线程退出标志。
+        _frame_count: 当前 episode 已录帧数（status_snapshot 暴露）。
+        _duration_sec: 当前 episode 已录时长（秒）（status_snapshot 暴露）。
     """
 
     def __init__(self, events: dict, *, fps: float = 30.0) -> None:
@@ -75,8 +82,13 @@ class RecorderController:
         self._log_tail: collections.deque = collections.deque(maxlen=200)
         # cam_name → ndarray RGB；Task 5 由录制器主循环 hook 写入
         self._latest_frames: dict = {}
-        # Task 5 接入录制器线程，当前 stub 为 None
+        # Task 5 接入录制器线程
         self._recorder_thread: Optional[threading.Thread] = None
+        self._record_args: Optional[dict] = None
+        self._should_stop: bool = False
+        # 当前 episode 进度（status_snapshot 暴露给 Task 4 前端）
+        self._frame_count: int = 0
+        self._duration_sec: float = 0.0
 
     # ---------- 按钮动作（写 events dict，等价键盘输入） ----------
 
@@ -102,9 +114,11 @@ class RecorderController:
         """停止整个录制会话（等价键盘 Esc 键 stop）。
 
         写入 stop_recording=True + exit_early=True，EpisodeDecider 判定为 stop→break 循环。
+        同时置 _should_stop=True 通知后台线程命令循环退出。
         """
         self._events["stop_recording"] = True
         self._events["exit_early"] = True
+        self._should_stop = True
         self._log("UI stop_recording: stop_recording=True + exit_early=True (等价键盘 Esc stop)")
 
     # ---------- 命令队列动作（不直接调机器人，守坑 7） ----------
@@ -150,7 +164,9 @@ class RecorderController:
         """返回当前状态快照（线程安全，纯 dict，可直接 JSON 序列化）。
 
         Returns:
-            含 state / episode_count / fps / log_tail 的纯字典。
+            含 state / episode_count / fps / log_tail / frame_count / duration_sec 的纯字典。
+            frame_count: 当前 episode 已录帧数（无录制时为 0）。
+            duration_sec: 当前 episode 已录时长秒（无录制时为 0.0）。
         """
         with self._lock:
             return {
@@ -158,6 +174,8 @@ class RecorderController:
                 "episode_count": self._ep_count,
                 "fps": self._fps,
                 "log_tail": list(self._log_tail),
+                "frame_count": self._frame_count,
+                "duration_sec": self._duration_sec,
             }
 
     def update_latest_frame(self, cam_name: str, rgb: "np.ndarray") -> None:
@@ -179,6 +197,182 @@ class RecorderController:
         with self._lock:
             arr = self._latest_frames.get(cam_name)
             return arr.copy() if arr is not None else None
+
+    # ---------- Task 5：录制参数装载 + 后台线程 ----------
+
+    def attach_record_args(self, *, robot, teleop, saver, run_episodes_fn=None,
+                           fps, episode_sec, gripper_max_open, cam_names,
+                           out_dir, task_name, oc2base_R, vr_source,
+                           episodes, reset_fn=None, reset_wait=0.0) -> None:
+        """装载录制参数（start() 前调用，后台线程消费）。
+
+        Args:
+            robot: Franka 实例（或 Fake）。
+            teleop: teleop 实例（或 Fake）。
+            saver: 存盘器实例（AsyncEpisodeSaver 或 Fake）。
+            run_episodes_fn: 可注入的 run_episodes 实现（None=使用真 run_episodes）。
+                            测试中注入 FakeRunner，真机走真 run_episodes。
+            fps: 录制帧率。
+            episode_sec: 每条 episode 最长时间（秒）。
+            gripper_max_open: 夹爪最大开度（米）。
+            cam_names: 相机名列表。
+            out_dir: 输出目录。
+            task_name: 任务名称。
+            oc2base_R: 3x3 标定旋转矩阵。
+            vr_source: VR 来源标识。
+            episodes: 录制 episode 总数。
+            reset_fn: 可选 Callable，episode 间调用回 home（守坑 7 由后台线程串行调）。
+            reset_wait: reset 后等待时间（秒）。
+        """
+        self._record_args = dict(
+            robot=robot,
+            teleop=teleop,
+            saver=saver,
+            run_episodes_fn=run_episodes_fn,
+            fps=fps,
+            episode_sec=episode_sec,
+            gripper_max_open=gripper_max_open,
+            cam_names=cam_names,
+            out_dir=out_dir,
+            task_name=task_name,
+            oc2base_R=oc2base_R,
+            vr_source=vr_source,
+            episodes=episodes,
+            reset_fn=reset_fn,
+            reset_wait=reset_wait,
+        )
+
+    def start(self) -> None:
+        """启动后台录制线程（_record_main 消费命令队列）。
+
+        attach_record_args 须在 start() 前调用。
+        线程为 daemon，进程退出时自动清理。
+        """
+        self._should_stop = False
+        self._recorder_thread = threading.Thread(
+            target=self._record_main, daemon=True, name="recorder-main"
+        )
+        self._recorder_thread.start()
+
+    def wait_until_done(self, timeout: float = 5.0) -> None:
+        """等待后台线程退出（join with timeout，无僵尸线程）。
+
+        Args:
+            timeout: join 超时秒数，超时后仅打警告，不抛异常。
+        """
+        t = self._recorder_thread
+        if t is None:
+            return
+        t.join(timeout)
+        if t.is_alive():
+            log.warning("[RecorderController] 后台录制线程 join 超时，仍在运行")
+        self._recorder_thread = None
+
+    def update_recording_progress(self, *, frame_count: int, duration_sec: float) -> None:
+        """更新当前 episode 录制进度（后台线程 frame_observer 调用，线程安全）。
+
+        Args:
+            frame_count: 当前 episode 已录帧数。
+            duration_sec: 当前 episode 已录时长（秒）。
+        """
+        with self._lock:
+            self._frame_count = frame_count
+            self._duration_sec = duration_sec
+
+    def reset_recording_progress(self) -> None:
+        """重置 episode 进度计数（每条 ep 开始前调用，线程安全）。"""
+        with self._lock:
+            self._frame_count = 0
+            self._duration_sec = 0.0
+
+    def _make_stop_flag(self):
+        """返回传给 run_episodes 的 stop_flag callable。
+
+        组合 exit_early / stop_recording（events dict）和 _should_stop（UI 全局退出），
+        与 EpisodeDecider.episode_stop_flag() 等价 + 额外 UI 全局兜底。
+        """
+        events = self._events
+
+        def _flag():
+            return bool(
+                events.get("exit_early")
+                or events.get("stop_recording")
+                or self._should_stop
+            )
+
+        return _flag
+
+    def _record_main(self) -> None:
+        """后台录制线程主循环：消费命令队列，串行执行 start/home 命令。
+
+        - 'start'：调用 run_episodes_fn（真机或 Fake），传入 frame_observer hook。
+        - 'home'：串行调用 reset_fn（守坑 7：UI 线程不直调 zerorpc）。
+        - 其他命令：丢弃并记日志。
+        - _should_stop=True 时退出循环。
+        """
+        while not self._should_stop:
+            try:
+                cmd = self._cmd_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if cmd == "start":
+                self._handle_start_cmd()
+            elif cmd == "home":
+                self._handle_home_cmd()
+            else:
+                log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
+
+    def _handle_start_cmd(self) -> None:
+        """处理 'start' 命令：调用 run_episodes_fn 执行录制。"""
+        if self._record_args is None:
+            log.error("[RecorderController] attach_record_args 未调用，无法 start")
+            return
+
+        args = self._record_args
+        run_fn = args["run_episodes_fn"]
+
+        # frame_observer：每帧每路 cam 写入 latest_frames 缓存（Task 3 预览路由读取）
+        def _frame_obs(cam_name: str, img: "np.ndarray") -> None:
+            self.update_latest_frame(cam_name, img)
+
+        try:
+            run_fn(
+                args["robot"],
+                args["teleop"],
+                args["saver"],
+                fps=args["fps"],
+                episode_sec=args["episode_sec"],
+                gripper_max_open=args["gripper_max_open"],
+                cam_names=args["cam_names"],
+                out_dir=args["out_dir"],
+                task_name=args["task_name"],
+                oc2base_R=args["oc2base_R"],
+                vr_source=args["vr_source"],
+                episodes=args["episodes"],
+                decide=lambda ep: "keep",  # UI 模式：由按钮事件控制，decide 默认 keep
+                reset_fn=args["reset_fn"],
+                reset_wait=args["reset_wait"],
+                stop_flag=self._make_stop_flag(),
+                frame_observer=_frame_obs,
+            )
+        except Exception as exc:
+            log.exception(f"[RecorderController] run_episodes_fn 异常: {exc}")
+
+    def _handle_home_cmd(self) -> None:
+        """处理 'home' 命令：串行调用 reset_fn（守坑 7，不在 UI 线程直调 zerorpc）。"""
+        if self._record_args is None:
+            log.error("[RecorderController] attach_record_args 未调用，无法 home")
+            return
+
+        reset_fn = self._record_args.get("reset_fn")
+        if reset_fn is not None:
+            try:
+                reset_fn()
+            except Exception as exc:
+                log.exception(f"[RecorderController] reset_fn 异常: {exc}")
+        else:
+            log.warning("[RecorderController] 'home' 命令：reset_fn 未配置，跳过")
 
     # ---------- 内部辅助 ----------
 
