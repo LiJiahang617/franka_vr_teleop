@@ -142,45 +142,59 @@ def _encode_jpg(img: np.ndarray) -> np.ndarray:
     return np.frombuffer(buf.tobytes(), np.uint8)
 
 
-def _make_robot_state_read_fn(robot):
+def _make_robot_state_read_fn(robot, zerorpc_lock=None):
     """构造 robot_state 采集线程的 read_fn。
 
-    设计：zerorpc client（robot._robot）非线程安全，只在此单线程内串行调用。
-    优先使用 robot._robot 分别调用关节位置/速度/EE位姿/夹爪状态；
+    设计：zerorpc client（robot._robot）非线程安全，所有 zerorpc 调用必须持
+    zerorpc_lock 才能执行，与主线程 send_action 串行互斥。
     若 robot._robot 不存在（FakeRobot 等测试替身），回退到 robot.get_observation()
-    并从结果 dict 中提取 arm/effector 字段。
+    并从结果 dict 中提取 arm/effector 字段（同样持锁，保持对称一致）。
+
+    robot_state read_fn 只产观测状态字段（joints/joint_vel/ee_pose/gripper_norm），
+    不产动作字段（gripper_cmd 由主循环从 teleop action 取）。
+
+    Args:
+        robot: Franka 实例（含 _robot zerorpc client）或测试替身。
+        zerorpc_lock: threading.Lock，保护所有 zerorpc client 调用。
+                      None 时不加锁（仅兼容旧测试，新代码应始终传入）。
 
     Returns:
-        Callable[[], dict]：返回含 arm/effector 字段的 dict。
+        Callable[[], dict]：返回含 arm/effector 观测字段的 dict。
     """
     zerorpc_client = getattr(robot, "_robot", None)
 
+    if zerorpc_lock is None:
+        # 无锁占位（测试回退兼容，不影响 FakeRobot 路径）
+        import contextlib
+        lock_ctx = contextlib.nullcontext
+    else:
+        lock_ctx = lambda: zerorpc_lock  # noqa: E731
+
     if zerorpc_client is not None:
-        # 真机路径：在单线程内串行调 zerorpc（非线程安全，不得并发调用）
+        # 真机路径：所有 zerorpc 调用必须持锁（与主线程 send_action 串行互斥）
         def _read_via_zerorpc():
-            joint_pos = zerorpc_client.robot_get_joint_positions()
-            joint_vel = zerorpc_client.robot_get_joint_velocities()
-            ee_pose = zerorpc_client.robot_get_ee_pose()
-            try:
-                gripper_state = zerorpc_client.gripper_get_state()
-                gripper_norm = max(0.0, min(1.0, gripper_state["width"] / robot.config.gripper_max_open))
-                gripper_cmd = float(robot._last_gripper_position)
-            except Exception:
-                # 夹爪不可用时零填（与 get_observation fallback 一致）
-                gripper_norm = 0.0
-                gripper_cmd = 0.0
+            with lock_ctx():
+                joint_pos = zerorpc_client.robot_get_joint_positions()
+                joint_vel = zerorpc_client.robot_get_joint_velocities()
+                ee_pose = zerorpc_client.robot_get_ee_pose()
+                try:
+                    gripper_state = zerorpc_client.gripper_get_state()
+                    gripper_norm = max(0.0, min(1.0, gripper_state["width"] / robot.config.gripper_max_open))
+                except Exception:
+                    # 夹爪不可用时仅 gripper_norm 置零（不连带影响已读的 joints/ee_pose）
+                    gripper_norm = 0.0
             return {
                 "joints": np.array(joint_pos, dtype=np.float64),
                 "joint_vel": np.array(joint_vel, dtype=np.float64),
                 "ee_pose": np.array(ee_pose, dtype=np.float64),
                 "gripper_norm": gripper_norm,
-                "gripper_cmd": gripper_cmd,
             }
         return _read_via_zerorpc
     else:
         # 测试回退路径：从 get_observation() 提取 arm/effector 字段
         def _read_via_get_observation():
-            obs = robot.get_observation()
+            with lock_ctx():
+                obs = robot.get_observation()
             joints = np.array([obs[f"joint_{i+1}.pos"] for i in range(7)], dtype=np.float64)
             joint_vel_arr = np.array([obs.get(f"joint_{i+1}.vel", 0.0) for i in range(7)], dtype=np.float64)
             ee_pose = np.array(
@@ -188,13 +202,11 @@ def _make_robot_state_read_fn(robot):
                 dtype=np.float64,
             )
             gripper_norm = float(obs.get("gripper_state_norm") or 0.0)
-            gripper_cmd = float(obs.get("gripper_cmd_bin", 0.0))
             return {
                 "joints": joints,
                 "joint_vel": joint_vel_arr,
                 "ee_pose": ee_pose,
                 "gripper_norm": gripper_norm,
-                "gripper_cmd": gripper_cmd,
             }
         return _read_via_get_observation
 
@@ -250,9 +262,13 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
     # 共享 stop_event，hub.stop() 时一次性停所有线程
     stop_event = threading.Event()
 
+    # zerorpc_lock：保护所有 zerorpc client 访问（robot._robot 非线程安全）
+    # robot_state 后台线程读状态 + 主线程 send_action 均持此锁，全程串行互斥
+    zerorpc_lock = threading.Lock()
+
     # robot_state 线程：串行调 zerorpc（真机）或 get_observation()（测试回退）
     # 包含 arm（关节/速度/EE位姿）与 effector（夹爪）两模态数据
-    robot_state_fn = _make_robot_state_read_fn(robot)
+    robot_state_fn = _make_robot_state_read_fn(robot, zerorpc_lock=zerorpc_lock)
     sensors = {
         "robot_state": SensorThread(
             name="robot_state",
@@ -280,13 +296,23 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
     t_end = time.monotonic() + max_sec
 
     try:
-        # 预热：等待所有线程至少采到一帧（最多等 2 个周期）
-        deadline_warm = time.monotonic() + 2.0 * period
+        # 预热：等待所有线程至少采到一帧（最多等 max(2*period, 0.5) 秒，相机首帧可能慢）
+        warm_timeout = max(2.0 * period, 0.5)
+        deadline_warm = time.monotonic() + warm_timeout
         while time.monotonic() < deadline_warm:
             snap = hub.snapshot(time.monotonic())
             if len(snap) == len(sensors):
                 break
             time.sleep(period * 0.1)
+
+        # 预热结束后检查哪些 sensor 仍未采到首帧，记 warning
+        snap_check = hub.snapshot(time.monotonic())
+        for sensor_name in sensors:
+            if sensor_name not in snap_check:
+                log.warning(
+                    f"[WARMUP] sensor '{sensor_name}' 预热超时未采到首帧，"
+                    "将降级为占位/stale"
+                )
 
         while time.monotonic() < t_end:
             # 键盘提前结束钩子
@@ -298,8 +324,9 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
             # 采集 teleop action
             action = teleop.get_action()
 
-            # 发送 action 到机器人
-            robot.send_action(action)
+            # 发送 action 到机器人（持 zerorpc_lock，与后台读状态线程串行互斥）
+            with zerorpc_lock:
+                robot.send_action(action)
 
             # 从 AcquisitionHub 取 snapshot（各模态各自最新时刻）
             now = time.monotonic()
@@ -312,7 +339,6 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                     "joint_vel": np.zeros(7, np.float64),
                     "ee_pose": np.zeros(6, np.float64),
                     "gripper_norm": 0.0,
-                    "gripper_cmd": 0.0,
                 },
                 now,
                 True,
@@ -323,7 +349,8 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
             ee_pose = np.asarray(rs_data["ee_pose"], np.float64)
             gripper_norm = float(rs_data["gripper_norm"])
             gripper_m = gripper_norm * gripper_max_open
-            gripper_cmd = float(rs_data["gripper_cmd"])
+            # Imp1：gripper_cmd 来自 teleop action（动作/指令语义），非观测侧
+            gripper_cmd = float(action.get("gripper_cmd_bin", 0.0))
 
             # arm_ts 和 effector_ts 共用 robot_state 线程的时间戳（schema v2 合规：数值接近）
             arm_ts = rs_ts
@@ -359,9 +386,8 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                 cam_ts[cn] = c_ts
                 cam_stale_dict[cn] = c_stale
 
-            ts_now = time.monotonic()
             buf.append(dict(
-                ts=ts_now,
+                ts=now,  # Minor1：帧时刻用 snapshot 时刻，非编码后时刻
                 # v2 各模态独立时间戳字段
                 arm_ts=arm_ts,
                 effector_ts=effector_ts,
