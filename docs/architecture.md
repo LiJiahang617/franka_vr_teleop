@@ -299,4 +299,73 @@ Franka 实时控制由 [Polymetis](https://polymetis-docs.github.io/) 提供。P
 
 ---
 
+
+
+---
+
+## 10. 数采 Web UI
+
+Phase E 新增 `scripts/ui/` 包，提供基于 Flask 的浏览器控制面板，替代终端键盘模式。
+
+### 架构
+
+**Flask 单进程**：主入口 `run_record_hdf5_ui.py` 在同一进程内启动 Flask HTTP 服务器（`threaded=True`，端口默认 5055）和后台录制线程。不引入 ROS service，不额外进程。
+
+```
+浏览器 (http://franka2:5055)
+       ↕ HTTP (5 按钮 + /api/status 轮询 + /api/preview/*)
+Flask routes (control_panel.py)
+       ↕ 方法调用
+RecorderController (recorder_controller.py)
+  ├── events dict  ← 写入 exit_early / rerecord_episode / stop_recording
+  ├── 命令队列 (queue.Queue)  ← "start" / "home"
+  └── 后台录制线程  → run_episodes_fn → AsyncEpisodeSaver → HDF5
+```
+
+### 核心模块
+
+| 模块 | 作用 |
+|---|---|
+| `scripts/ui/state.py` | `UIState` 枚举 + `StateMachine`（线程安全 RLock 保护，非法转移 fail-loud） |
+| `scripts/ui/recorder_controller.py` | `RecorderController`：持有 events dict / 命令队列 / 状态机 / 最新帧缓存；桥接 Flask 路由与录制器后台线程 |
+| `scripts/ui/control_panel.py` | `build_app(controller)`：Flask app 工厂函数，注册 6 条路由 + `@after_request` Cache-Control 钩子 |
+| `scripts/ui/preview.py` | `encode_preview_jpeg`：RGB→BGR→JPEG 编码（复用 `_encode_jpg` 通道序，防反色）；`encode_preview_base64`：base64 封装供路由 JSON 返回 |
+| `scripts/ui/templates/control_panel.html` | 5 按钮控制面板 + 双相机 base64 jpeg 预览 + 30Hz JS 轮询（外部文件，规避 Python 三引号 JS 换行陷阱） |
+| `scripts/core/run_record_hdf5_ui.py` | UI 模式主入口：组装 robot/teleop/saver + RecorderController + Flask app，app.run(threaded=True) |
+
+### 状态机
+
+```
+INITIALIZING → WAITING → RECORDING → CONFIRMING → SAVING → READY → (WAITING 循环)
+                                          ↓（丢弃）
+                                        WAITING
+```
+
+每条状态转移由 RecorderController 方法触发；非法转移抛 `IllegalTransition`（fail-loud）。
+
+### RecorderController 桥接
+
+- **保存/丢弃/停止**：直接写 events dict（`exit_early` / `rerecord_episode` / `stop_recording`），语义与终端键盘逐字等价，`EpisodeDecider` 消费。
+- **开始/回 Home**：入命令队列，由后台录制线程串行消费（守坑 7：UI 路由禁止直调 zerorpc，防单线程并发争用）。
+- **frame_observer hook**：录制循环每帧回调 `update_latest_frame(cam, rgb)`，更新共享缓存（加锁 `.copy()`）；预览路由从缓存读，不直接调 `robot.get_observation()`。
+
+### 与终端键盘模式的关系
+
+两者**互斥、二选一**，通过不同入口启动：
+
+| 模式 | 入口 | 控制方式 |
+|---|---|---|
+| 终端键盘 | `scripts/core/run_record_hdf5.py` | `→` keep / `←` discard / Esc stop |
+| Web UI | `scripts/core/run_record_hdf5_ui.py` | 浏览器 5 按钮 + 相机预览 |
+
+`run_episodes` / `record_episode` / `AsyncEpisodeSaver` / `write_episode` 等核心链路**完全复用，零改动**。
+
+### 关键设计约束
+
+- **Cache-Control 红线**：`@after_request` 统一加 `no-cache, no-store, must-revalidate`（防 stale UI）。
+- **HTML 模板外部文件**：规避 Python 三引号字符串内 JS `\n` 被解释为真换行导致 SyntaxError。
+- **zerorpc 单线程**：UI 路由不直接调 zerorpc，all zerorpc 调用由后台录制线程串行执行。
+- **接口零破坏**：`record_episode(frame_observer=None)` 默认 None = 零行为变化，既有测试全绿即证据。
+
+
 *相关文档：[data-format.md](data-format.md)（schema 详解）、[development-guide.md](development-guide.md)（开发说明）、[../README.md](../README.md)（快速上手）。*

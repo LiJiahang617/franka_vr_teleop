@@ -50,6 +50,7 @@ scripts/
   config/    record_cfg*.yaml / train_cfg.yaml
   utils/     关节 offset 标定
   help/      franka-help
+  ui/        数采 Web UI Flask app（控制面板、状态机、预览编码、HTML 模板）
 lerobot_robot_franka/         子包①：Franka Robot 接口 + zerorpc server/client
 lerobot_teleoperator_franka/  子包②：遥操作设备 + Route B 映射
 tests/                        pytest 测试（纯逻辑离线可跑）
@@ -73,9 +74,9 @@ cd /home/ubuntu/Desktop/jhli/lerobot_franka_teleop
 python -m pytest tests/ -q
 ```
 
-当前共 **317 个用例**。覆盖范围：schema 校验、hdf5 writer（同步/异步）、async saver、preflight（夹爪/色彩）、record params、record loop、episode keyboard、unityvr mapping、vr align、unity vr reader、v21 转换器（meta/parquet/video/structure-diff/cli）、路径一致性、import 顺序守门、record_cfg yaml 解析等。
+当前共 **398 个用例**。覆盖范围：schema 校验、hdf5 writer（同步/异步）、async saver、preflight（夹爪/色彩）、record params、record loop、episode keyboard、unityvr mapping、vr align、unity vr reader、v21 转换器（meta/parquet/video/structure-diff/cli）、路径一致性、import 顺序守门、record_cfg yaml 解析等。
 
-新增/修改纯逻辑代码时**必须**补充对应 `tests/test_*.py`，并保证 317（或新增后总数）全绿。
+新增/修改纯逻辑代码时**必须**补充对应 `tests/test_*.py`，并保证 398（或新增后总数）全绿。
 
 ---
 
@@ -178,6 +179,7 @@ bash debug/franka_clean_restart.sh   # 清理 → 起臂 → 验 → 起 zerorpc
 | `2026-05-20-phaseC-axis-gain-orthogonal-to-mapping.md` | per-axis 增益层与映射方向/手性正交，增益只缩放灵敏度，绝不改方向/手性（红线） |
 | `2026-05-20-preflight-gripper-span-verdict.md` | 夹爪预检正解判据：用多目标 width 整体跨度 `max-min>0.02`，禁相邻差 `>0.01` 假阴性判据 |
 | `2026-05-20-v21-loadability-franka2-probe.md` | v2.1 加载性 franka2 探测取舍 |
+| `2026-05-22-flask-ui-no-cache-and-js-newline.md` | Flask 响应必须加 `Cache-Control: no-cache` 头（防 stale UI）；Python 三引号字符串内 JS `\n` 变真换行炸 SyntaxError，HTML 模板放外部文件规避 |
 
 其他常见陷阱：
 
