@@ -2,7 +2,7 @@
 
 与既有 run_record.py 并存，不改其逻辑。
 读取同一份 record_cfg.yaml，用 RecordConfig 解析配置，
-把 LeRobotDataset sink 替换为 HDF5EpisodeWriter 写 franka-hdf5-v1。
+把 LeRobotDataset sink 替换为 HDF5EpisodeWriter 写 franka-hdf5-v2。
 
 观测字段对齐说明（来自 franka.py get_observation 实读）：
   - joint 位置: joint_1.pos ... joint_7.pos (float，单独 key)
@@ -11,12 +11,19 @@
   - 夹爪状态:  gripper_state_norm ([0,1]), gripper_max_open 来自 cfg
   - 夹爪指令:  gripper_cmd_bin (get_action 返回)
   - 相机图像:  cam.read() 返回 numpy array，用 cv2.imencode 编码为 jpeg bytes
+
+多线程采集架构（Phase D Task 4）：
+  - robot_state 线程：单线程内串行调 zerorpc 读关节+夹爪+EE位姿，返回 dict
+  - wrist_cam 线程：独立调用 wrist 相机 read()，与 robot_state 真并行
+  - exterior_cam 线程：独立调用 exterior 相机 read()，与 robot_state 真并行
+  - state_hifreq：Task 4 不接（M=0 占位，Task 7 范畴）
 """
 import argparse
 import copy
 import logging
 import os
 import sys
+import threading
 import time
 
 import cv2
@@ -30,6 +37,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 
 # 纯逻辑依赖（无硬件）：可在模块顶层 import，测试加载安全
 from core import paths as _paths
+from core.acquisition import AcquisitionHub, SensorThread
 from core.async_saver import AsyncEpisodeSaver
 from core.hdf5_writer import write_episode
 from core.record_params import resolve_record_fps, extract_joint_vel, realsense_fps, parse_reset_config, resolve_record_overrides
@@ -134,27 +142,102 @@ def _encode_jpg(img: np.ndarray) -> np.ndarray:
     return np.frombuffer(buf.tobytes(), np.uint8)
 
 
+def _make_robot_state_read_fn(robot):
+    """构造 robot_state 采集线程的 read_fn。
+
+    设计：zerorpc client（robot._robot）非线程安全，只在此单线程内串行调用。
+    优先使用 robot._robot 分别调用关节位置/速度/EE位姿/夹爪状态；
+    若 robot._robot 不存在（FakeRobot 等测试替身），回退到 robot.get_observation()
+    并从结果 dict 中提取 arm/effector 字段。
+
+    Returns:
+        Callable[[], dict]：返回含 arm/effector 字段的 dict。
+    """
+    zerorpc_client = getattr(robot, "_robot", None)
+
+    if zerorpc_client is not None:
+        # 真机路径：在单线程内串行调 zerorpc（非线程安全，不得并发调用）
+        def _read_via_zerorpc():
+            joint_pos = zerorpc_client.robot_get_joint_positions()
+            joint_vel = zerorpc_client.robot_get_joint_velocities()
+            ee_pose = zerorpc_client.robot_get_ee_pose()
+            try:
+                gripper_state = zerorpc_client.gripper_get_state()
+                gripper_norm = max(0.0, min(1.0, gripper_state["width"] / robot.config.gripper_max_open))
+                gripper_cmd = float(robot._last_gripper_position)
+            except Exception:
+                # 夹爪不可用时零填（与 get_observation fallback 一致）
+                gripper_norm = 0.0
+                gripper_cmd = 0.0
+            return {
+                "joints": np.array(joint_pos, dtype=np.float64),
+                "joint_vel": np.array(joint_vel, dtype=np.float64),
+                "ee_pose": np.array(ee_pose, dtype=np.float64),
+                "gripper_norm": gripper_norm,
+                "gripper_cmd": gripper_cmd,
+            }
+        return _read_via_zerorpc
+    else:
+        # 测试回退路径：从 get_observation() 提取 arm/effector 字段
+        def _read_via_get_observation():
+            obs = robot.get_observation()
+            joints = np.array([obs[f"joint_{i+1}.pos"] for i in range(7)], dtype=np.float64)
+            joint_vel_arr = np.array([obs.get(f"joint_{i+1}.vel", 0.0) for i in range(7)], dtype=np.float64)
+            ee_pose = np.array(
+                [obs[f"ee_pose.{ax}"] for ax in ["x", "y", "z", "rx", "ry", "rz"]],
+                dtype=np.float64,
+            )
+            gripper_norm = float(obs.get("gripper_state_norm") or 0.0)
+            gripper_cmd = float(obs.get("gripper_cmd_bin", 0.0))
+            return {
+                "joints": joints,
+                "joint_vel": joint_vel_arr,
+                "ee_pose": ee_pose,
+                "gripper_norm": gripper_norm,
+                "gripper_cmd": gripper_cmd,
+            }
+        return _read_via_get_observation
+
+
+def _make_camera_read_fn(cam):
+    """构造单路相机采集线程的 read_fn。
+
+    Args:
+        cam: 相机对象，需有 read() 方法返回 RGB ndarray。
+
+    Returns:
+        Callable[[], np.ndarray]：返回原始 RGB ndarray（不编码）。
+    """
+    def _read():
+        return cam.read()
+    return _read
+
+
 def record_episode(robot, teleop, fps: float, max_sec: float,
                    gripper_max_open: float, cam_names: list,
                    *, stop_flag=None, frame_observer=None) -> list:
-    """录制一个 episode，每 tick 收 action/obs 拼 frame 返回帧列表。
+    """录制一个 episode，每 tick 从 AcquisitionHub 拉 snapshot 拼帧返回帧列表。
 
-    图像在 _encode_jpg 中编码（cvtColor(RGB2BGR)->imencode），
-    编码在 deepcopy 前完成（由 run_episodes 在 submit 前 deepcopy）。
+    多线程采集架构（Phase D Task 4 核心）：
+    - robot_state 线程（含 arm/effector）：单线程内串行调 zerorpc 或测试回退
+      get_observation()，与相机线程真并行。zerorpc 非线程安全，绝不并发。
+    - wrist_cam / exterior_cam 线程：各自独立调 cam.read()，真并行。
+    - 主循环按 fps 节拍 hub.snapshot(now) 拼帧，hub.stop() 优雅退出无僵尸。
+
+    图像在 _encode_jpg 中编码（cvtColor(RGB2BGR)->imencode），编码在 deepcopy 前完成。
+    frame_observer 在 _encode_jpg 之前调用原始 RGB（守门测试约束不变）。
 
     Args:
-        robot: Franka 实例
+        robot: Franka 实例（含 cameras 属性和 _robot zerorpc client）
         teleop: teleop 实例
         fps: 目标帧率
         max_sec: 最长录制时间（秒）
         gripper_max_open: 夹爪最大开度（米），用于将 norm 转换为 gripper_m
         cam_names: 相机名列表，需与写盘时 cam_names 一致
-        stop_flag: 可选 callable()->bool，返回 True 时提前结束当前 ep  # Task4 中途中断预留, 当前未接线
-                   （Task 4 键盘接入；本 Task 默认 None=按 max_sec 结束）
+        stop_flag: 可选 callable()->bool，返回 True 时提前结束当前 ep
         frame_observer: 可选 Callable[[str, np.ndarray], None]，每帧每路 cam
                         在 _encode_jpg 之前调用，传入 (cam_name, rgb_ndarray)。
-                        默认 None=零行为变化（既有代码路径完全不变）。
-                        注意：observer 收到的是 obs[cn] 原始引用，勿在内部修改。
+                        默认 None=零行为变化。
 
     Returns:
         list[dict]：采集的帧列表，每帧含 ts/joints/joint_vel/ee_pose/
@@ -163,95 +246,148 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                     v2 扩展字段：arm_ts/effector_ts/cam_ts/cam_hw_ts/
                     arm_stale/effector_stale/cam_stale（各模态独立时间戳与 stale 标志）。
     """
+    # --- 构造 3 个 SensorThread + AcquisitionHub ---
+    # 共享 stop_event，hub.stop() 时一次性停所有线程
+    stop_event = threading.Event()
+
+    # robot_state 线程：串行调 zerorpc（真机）或 get_observation()（测试回退）
+    # 包含 arm（关节/速度/EE位姿）与 effector（夹爪）两模态数据
+    robot_state_fn = _make_robot_state_read_fn(robot)
+    sensors = {
+        "robot_state": SensorThread(
+            name="robot_state",
+            read_fn=robot_state_fn,
+            target_rate=fps,
+            stop_event=stop_event,
+        ),
+    }
+
+    # 各路相机线程：仅在 robot.cameras 中有 read() 方法时建立
+    for cn in cam_names:
+        cam = robot.cameras.get(cn)
+        if cam is not None and hasattr(cam, "read"):
+            sensors[cn] = SensorThread(
+                name=cn,
+                read_fn=_make_camera_read_fn(cam),
+                target_rate=fps,
+                stop_event=stop_event,
+            )
+
+    hub = AcquisitionHub(sensors)
+
     buf = []
     period = 1.0 / fps
     t_end = time.monotonic() + max_sec
-    while time.monotonic() < t_end:
-        # 键盘提前结束钩子（Task 4 接入；stop_flag=None 时跳过判断）
-        if stop_flag is not None and stop_flag():
-            break
 
-        t0 = time.monotonic()
+    try:
+        # 预热：等待所有线程至少采到一帧（最多等 2 个周期）
+        deadline_warm = time.monotonic() + 2.0 * period
+        while time.monotonic() < deadline_warm:
+            snap = hub.snapshot(time.monotonic())
+            if len(snap) == len(sensors):
+                break
+            time.sleep(period * 0.1)
 
-        # 采集 teleop action
-        action = teleop.get_action()
+        while time.monotonic() < t_end:
+            # 键盘提前结束钩子
+            if stop_flag is not None and stop_flag():
+                break
 
-        # 发送 action 到机器人
-        robot.send_action(action)
+            t0 = time.monotonic()
 
-        # 采集机器人观测（包含相机图像）
-        obs = robot.get_observation()
+            # 采集 teleop action
+            action = teleop.get_action()
 
-        # 拼接 joint 位置数组（joint_1.pos ... joint_7.pos）
-        joints = np.array([obs[f"joint_{i+1}.pos"] for i in range(7)], dtype=np.float64)
+            # 发送 action 到机器人
+            robot.send_action(action)
 
-        # joint_vel: 已接通 robot_get_joint_velocities; 缺失则零填(向后兼容)
-        joint_vel = extract_joint_vel(obs)
+            # 从 AcquisitionHub 取 snapshot（各模态各自最新时刻）
+            now = time.monotonic()
+            snap = hub.snapshot(now)
 
-        # ee_pose 数组
-        ee_pose = np.array(
-            [obs[f"ee_pose.{ax}"] for ax in ["x", "y", "z", "rx", "ry", "rz"]],
-            dtype=np.float64,
-        )
+            # --- 解包 robot_state 模态（arm/effector 共用同一线程时刻）---
+            rs_default = (
+                {
+                    "joints": np.zeros(7, np.float64),
+                    "joint_vel": np.zeros(7, np.float64),
+                    "ee_pose": np.zeros(6, np.float64),
+                    "gripper_norm": 0.0,
+                    "gripper_cmd": 0.0,
+                },
+                now,
+                True,
+            )
+            rs_data, rs_ts, rs_stale = snap.get("robot_state", rs_default)
+            joints = np.asarray(rs_data["joints"], np.float64)
+            joint_vel = np.asarray(rs_data["joint_vel"], np.float64)
+            ee_pose = np.asarray(rs_data["ee_pose"], np.float64)
+            gripper_norm = float(rs_data["gripper_norm"])
+            gripper_m = gripper_norm * gripper_max_open
+            gripper_cmd = float(rs_data["gripper_cmd"])
 
-        # 夹爪状态：gripper_state_norm * gripper_max_open → gripper_m
-        gripper_norm = float(obs.get("gripper_state_norm") or 0.0)
-        gripper_m = gripper_norm * gripper_max_open
+            # arm_ts 和 effector_ts 共用 robot_state 线程的时间戳（schema v2 合规：数值接近）
+            arm_ts = rs_ts
+            effector_ts = rs_ts
+            arm_stale = rs_stale
+            effector_stale = rs_stale
 
-        # 夹爪指令
-        gripper_cmd = float(action.get("gripper_cmd_bin", 0.0))
+            # delta_ee_pose action 数组
+            delta_ee_pose = np.array(
+                [action.get(f"delta_ee_pose.{ax}", 0.0) for ax in ["x", "y", "z", "rx", "ry", "rz"]],
+                dtype=np.float64,
+            )
 
-        # delta_ee_pose action 数组
-        delta_ee_pose = np.array(
-            [action.get(f"delta_ee_pose.{ax}", 0.0) for ax in ["x", "y", "z", "rx", "ry", "rz"]],
-            dtype=np.float64,
-        )
+            # --- 解包各相机模态 ---
+            cams = {}
+            cam_ts = {}
+            cam_stale_dict = {}
+            for cn in cam_names:
+                if cn in snap:
+                    img, c_ts, c_stale = snap[cn]
+                else:
+                    # 相机线程无 read() 或未采到帧：占位
+                    img, c_ts, c_stale = None, now, True
 
-        # v2：arm/effector 独立时间戳（采集完 obs 后立即打戳，串行采集时差极小）
-        arm_ts = time.monotonic()
-        effector_ts = arm_ts  # 串行采集：arm/effector 在同一 get_observation 调用中读取
+                if img is not None and isinstance(img, np.ndarray):
+                    # frame_observer 在 _encode_jpg 之前调用原始 RGB（守门测试约束）
+                    if frame_observer is not None:
+                        frame_observer(cn, img)
+                    cams[cn] = _encode_jpg(img)
+                else:
+                    cams[cn] = np.zeros((4,), np.uint8)
 
-        # 相机图像：编码为 jpeg bytes（编码在 deepcopy 前，满足 deepcopy 时序要求）
-        cams = {}
-        cam_ts = {}   # v2：各相机独立软件戳
-        for cn in cam_names:
-            img = obs.get(cn)
-            if img is not None and isinstance(img, np.ndarray):
-                # frame_observer 在 _encode_jpg 之前调用原始 RGB 数据（Task 5 hook）
-                if frame_observer is not None:
-                    frame_observer(cn, img)
-                cams[cn] = _encode_jpg(img)
-            else:
-                # 占位（相机未就绪时）
-                cams[cn] = np.zeros((4,), np.uint8)
-            # 图像处理后打相机软件戳（Task 8 实填真硬件戳）
-            cam_ts[cn] = time.monotonic()
+                cam_ts[cn] = c_ts
+                cam_stale_dict[cn] = c_stale
 
-        ts_now = time.monotonic()
-        buf.append(dict(
-            ts=ts_now,
-            # v2 各模态独立时间戳字段
-            arm_ts=arm_ts,
-            effector_ts=effector_ts,
-            cam_ts=cam_ts,
-            cam_hw_ts={cn: cam_ts[cn] for cn in cam_names},  # Task 8 实填真硬件戳；此处软件戳占位
-            # v2 stale 字段（串行采集无 stale，全 False；Task 7/8 接入并行采集后可能非零）
-            arm_stale=False,
-            effector_stale=False,
-            cam_stale={cn: False for cn in cam_names},
-            joints=joints,
-            joint_vel=joint_vel,
-            ee_pose=ee_pose,
-            gripper_m=gripper_m,
-            gripper_norm=gripper_norm,
-            gripper_cmd=gripper_cmd,
-            delta_ee_pose=delta_ee_pose,
-            cams=cams,
-        ))
+            ts_now = time.monotonic()
+            buf.append(dict(
+                ts=ts_now,
+                # v2 各模态独立时间戳字段
+                arm_ts=arm_ts,
+                effector_ts=effector_ts,
+                cam_ts=cam_ts,
+                cam_hw_ts={cn: cam_ts[cn] for cn in cam_names},  # Task 8 实填真硬件戳；此处软件戳占位
+                # v2 stale 字段（各模态独立，多线程时可能非零）
+                arm_stale=arm_stale,
+                effector_stale=effector_stale,
+                cam_stale=cam_stale_dict,
+                joints=joints,
+                joint_vel=joint_vel,
+                ee_pose=ee_pose,
+                gripper_m=gripper_m,
+                gripper_norm=gripper_norm,
+                gripper_cmd=gripper_cmd,
+                delta_ee_pose=delta_ee_pose,
+                cams=cams,
+            ))
 
-        dt = period - (time.monotonic() - t0)
-        if dt > 0:
-            time.sleep(dt)
+            dt = period - (time.monotonic() - t0)
+            if dt > 0:
+                time.sleep(dt)
+
+    finally:
+        # 优雅退出：置 stop_event，join 所有采集线程（timeout=2s），无僵尸
+        hub.stop()
 
     return buf
 
@@ -346,7 +482,7 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="hdf5 录制入口（franka-hdf5-v1）")
+    ap = argparse.ArgumentParser(description="hdf5 录制入口（franka-hdf5-v2）")
     ap.add_argument("--config", required=True, help="record_cfg.yaml 路径")
     ap.add_argument("--fps", type=float, default=None, help="录制帧率(默认读 cfg.fps; 给了则临时覆盖)")
     ap.add_argument("--episodes", type=int, default=None, help="录制 episode 数(默认读 cfg.task.num_episodes; 给了则临时覆盖)")

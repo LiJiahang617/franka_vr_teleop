@@ -24,11 +24,22 @@ def _load():
     return m
 
 
+class FakeCam:
+    """带 read() 方法的假相机，供 record_episode 的相机 SensorThread 使用。"""
+    def __init__(self, shape=(8, 8, 3)):
+        self._shape = shape
+
+    def read(self):
+        return np.zeros(self._shape, np.uint8)
+
+
 class FakeRobot:
     def __init__(self):
-        self.cameras = {"wrist_image": object()}
+        # cameras 值需有 read() 方法，供相机 SensorThread 采集
+        self.cameras = {"wrist_image": FakeCam((8, 8, 3))}
 
     def get_observation(self):
+        # robot_state 线程的测试回退路径（当 _robot 不存在时）
         o = {f"joint_{i+1}.pos": 0.0 for i in range(7)}
         o.update({f"joint_{i+1}.vel": 0.0 for i in range(7)})
         o.update({f"ee_pose.{a}": 0.0 for a in "x y z rx ry rz".split()})

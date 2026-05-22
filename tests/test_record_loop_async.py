@@ -8,9 +8,19 @@ _s = importlib.util.spec_from_file_location(
 # 注: 模块级 import 真包较重; 用 spec 但只测纯编排函数, 见下
 
 
+class FakeCam:
+    """带 read() 方法的假相机，供 record_episode 的相机 SensorThread 使用。"""
+    def __init__(self, shape=(4, 4, 3)):
+        self._shape = shape
+
+    def read(self):
+        return np.zeros(self._shape, np.uint8)
+
+
 class FakeRobot:
-    def __init__(self): self.cameras = {"wrist_image": object()}
+    def __init__(self): self.cameras = {"wrist_image": FakeCam((4, 4, 3))}
     def get_observation(self):
+        # robot_state 线程测试回退路径（_robot 不存在时）
         o = {f"joint_{i+1}.pos": 0.0 for i in range(7)}
         o.update({f"joint_{i+1}.vel": 0.0 for i in range(7)})
         o.update({f"ee_pose.{a}": 0.0 for a in "x y z rx ry rz".split()})
