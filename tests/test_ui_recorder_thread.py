@@ -218,3 +218,184 @@ def test_background_thread_updates_progress_during_run():
     frame = ctl.get_latest_frame("wrist_image")
     assert frame is not None
     assert frame[0, 0, 0] == 2
+# ===== 新增测试 =====
+# 缺陷 1：decide 必须复用 EpisodeDecider 而非恒返回 "keep"
+# 缺陷 2：frame_observer 接线 frame_count / duration_sec
+
+
+def test_decide_uses_episode_decider_rerecord():
+    """UI 模式 decide 在 rerecord_episode=True 时应返回 'discard'，而非 'keep'。"""
+    captured_decide = []
+
+    class DecideCapture:
+        """捕获传入的 decide 函数，并直接调用一次。"""
+        def __call__(self, robot, teleop, saver, **kw):
+            decide = kw.get("decide")
+            assert decide is not None, "run_fn 未收到 decide 参数"
+            captured_decide.append(decide)
+
+    events = {"exit_early": True, "rerecord_episode": True, "stop_recording": False}
+    runner = DecideCapture()
+    ctl = rc.RecorderController(events=events)
+    ctl.attach_record_args(
+        robot=object(), teleop=object(), saver=object(),
+        run_episodes_fn=runner,
+        fps=30.0, episode_sec=1.0, gripper_max_open=0.08,
+        cam_names=["wrist_image"], out_dir="/tmp", task_name="t",
+        oc2base_R=np.eye(3), vr_source="u", episodes=1,
+        reset_fn=None, reset_wait=0.0,
+    )
+    ctl.start_recording()
+    ctl.start()
+    ctl.wait_until_done(timeout=2.0)
+
+    assert len(captured_decide) == 1, "decide 未被传入 run_fn"
+    result = captured_decide[0](ep=0)
+    assert result == "discard", f"期望 'discard'，实际得到 {result!r}"
+
+
+def test_decide_uses_episode_decider_stop():
+    """UI 模式 decide 在 stop_recording=True 时应返回 'stop'。"""
+    captured_decide = []
+
+    class DecideCapture:
+        def __call__(self, robot, teleop, saver, **kw):
+            decide = kw.get("decide")
+            captured_decide.append(decide)
+
+    events = {"exit_early": True, "rerecord_episode": False, "stop_recording": True}
+    runner = DecideCapture()
+    ctl = rc.RecorderController(events=events)
+    ctl.attach_record_args(
+        robot=object(), teleop=object(), saver=object(),
+        run_episodes_fn=runner,
+        fps=30.0, episode_sec=1.0, gripper_max_open=0.08,
+        cam_names=["wrist_image"], out_dir="/tmp", task_name="t",
+        oc2base_R=np.eye(3), vr_source="u", episodes=1,
+        reset_fn=None, reset_wait=0.0,
+    )
+    ctl.start_recording()
+    ctl.start()
+    ctl.wait_until_done(timeout=2.0)
+
+    assert len(captured_decide) == 1
+    result = captured_decide[0](ep=0)
+    assert result == "stop", f"期望 'stop'，实际得到 {result!r}"
+
+
+def test_decide_uses_episode_decider_keep():
+    """UI 模式 decide 在 events 全 False 时应返回 'keep'（headless/正常保存）。"""
+    captured_decide = []
+
+    class DecideCapture:
+        def __call__(self, robot, teleop, saver, **kw):
+            decide = kw.get("decide")
+            captured_decide.append(decide)
+
+    events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
+    runner = DecideCapture()
+    ctl = rc.RecorderController(events=events)
+    ctl.attach_record_args(
+        robot=object(), teleop=object(), saver=object(),
+        run_episodes_fn=runner,
+        fps=30.0, episode_sec=1.0, gripper_max_open=0.08,
+        cam_names=["wrist_image"], out_dir="/tmp", task_name="t",
+        oc2base_R=np.eye(3), vr_source="u", episodes=1,
+        reset_fn=None, reset_wait=0.0,
+    )
+    ctl.start_recording()
+    ctl.start()
+    ctl.wait_until_done(timeout=2.0)
+
+    assert len(captured_decide) == 1
+    result = captured_decide[0](ep=0)
+    assert result == "keep", f"期望 'keep'，实际得到 {result!r}"
+
+
+def test_frame_observer_updates_frame_count_and_duration():
+    """frame_observer 调用同一相机 5 次后，frame_count 应增长，duration_sec >= 0。"""
+    frame_observer_ref = []
+
+    class FrameObsCapture:
+        def __call__(self, robot, teleop, saver, **kw):
+            fo = kw.get("frame_observer")
+            frame_observer_ref.append(fo)
+            # 模拟 5 次同一相机帧到达
+            img = np.zeros((4, 4, 3), np.uint8)
+            for _ in range(5):
+                if fo is not None:
+                    fo("wrist_image", img)
+                time.sleep(0.005)
+
+    events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
+    ctl = rc.RecorderController(events=events)
+    runner = FrameObsCapture()
+    ctl.attach_record_args(
+        robot=object(), teleop=object(), saver=object(),
+        run_episodes_fn=runner,
+        fps=30.0, episode_sec=1.0, gripper_max_open=0.08,
+        cam_names=["wrist_image"], out_dir="/tmp", task_name="t",
+        oc2base_R=np.eye(3), vr_source="u", episodes=1,
+        reset_fn=None, reset_wait=0.0,
+    )
+    ctl.start_recording()
+    ctl.start()
+    ctl.wait_until_done(timeout=2.0)
+
+    snap = ctl.status_snapshot()
+    # 5 帧录制后 frame_count 应有记录（>0 或 episode 结束后已 reset，取决于实现）
+    # 测试录制期间最大值：直接在录制结束前读取
+    # 这里验证 duration_sec 字段存在且 >= 0（真实接线后不再是固定 0）
+    assert "frame_count" in snap
+    assert "duration_sec" in snap
+    assert snap["duration_sec"] >= 0.0
+
+
+def test_frame_count_increases_during_recording():
+    """录制期间 frame_count 应在录制完成前累积（未 reset 时 > 0）。"""
+    max_frame_count_seen = [0]
+    recording_done = threading.Event()
+
+    class CountingRunner:
+        def __call__(self, robot, teleop, saver, **kw):
+            fo = kw.get("frame_observer")
+            img = np.zeros((4, 4, 3), np.uint8)
+            # 注入 5 帧
+            for i in range(5):
+                if fo:
+                    fo("wrist_image", img)
+                time.sleep(0.01)
+            # 录制期间读取 frame_count（在 decide/reset 之前）
+            # 注意：decide 调用在 runner 返回后，但这里需要在 reset 前采样
+            recording_done.set()
+
+    events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
+    ctl = rc.RecorderController(events=events)
+
+    # 监控线程：录制中途采样 frame_count
+    def monitor():
+        recording_done.wait(timeout=2.0)
+        snap = ctl.status_snapshot()
+        max_frame_count_seen[0] = snap["frame_count"]
+
+    mon = threading.Thread(target=monitor, daemon=True)
+    mon.start()
+
+    runner = CountingRunner()
+    ctl.attach_record_args(
+        robot=object(), teleop=object(), saver=object(),
+        run_episodes_fn=runner,
+        fps=30.0, episode_sec=1.0, gripper_max_open=0.08,
+        cam_names=["wrist_image"], out_dir="/tmp", task_name="t",
+        oc2base_R=np.eye(3), vr_source="u", episodes=1,
+        reset_fn=None, reset_wait=0.0,
+    )
+    ctl.start_recording()
+    ctl.start()
+    mon.join(timeout=3.0)
+    ctl.wait_until_done(timeout=2.0)
+
+    # 录制期间 frame_count 应 >= 5（5 次同一相机调用）
+    assert max_frame_count_seen[0] >= 5, (
+        f"期望录制期间 frame_count >= 5，实际为 {max_frame_count_seen[0]}"
+    )

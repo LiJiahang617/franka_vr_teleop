@@ -3,7 +3,7 @@ RecorderController：UI 与录制器之间的桥梁。
 
 职责：
 - 持有 events dict（供 EpisodeDecider 消费，语义与终端键盘逐字等价）
-- 持有命令队列（start/home 走队列，由 Task 5 录制器主循环串行消费；守坑 7 不直接调 zerorpc）
+- 持有命令队列（start/home 走队列，由 Task 5 录制器主循环串行消费；守坑 7 不直调 zerorpc）
 - 持有状态机（Task 1 的 StateMachine）
 - 线程安全：episode_count / latest_frames / log_tail / frame_count / duration_sec 均在 _lock 下操作
 - 录制器线程在 Task 5 接入（attach_record_args + start + _record_main）
@@ -13,7 +13,9 @@ import importlib.util
 import logging
 import os
 import queue
+import sys
 import threading
+import time
 from typing import Optional
 
 log = logging.getLogger("recorder_controller")
@@ -28,6 +30,16 @@ _state_spec = importlib.util.spec_from_file_location(
 _state_mod = importlib.util.module_from_spec(_state_spec)
 _state_spec.loader.exec_module(_state_mod)
 StateMachine = _state_mod.StateMachine
+
+# 动态加载 EpisodeDecider（与 UI 包分离，避免循环依赖）
+_SCRIPTS_DIR = os.path.dirname(_UI_DIR)
+_ep_key_spec = importlib.util.spec_from_file_location(
+    "episode_keyboard",
+    os.path.join(_SCRIPTS_DIR, "core", "episode_keyboard.py"),
+)
+_ep_key_mod = importlib.util.module_from_spec(_ep_key_spec)
+_ep_key_spec.loader.exec_module(_ep_key_mod)
+EpisodeDecider = _ep_key_mod.EpisodeDecider
 
 # events dict 必须含有的三个键（与 EpisodeDecider 字段逐字等价）
 _REQUIRED_KEYS = frozenset({"exit_early", "rerecord_episode", "stop_recording"})
@@ -54,9 +66,11 @@ class RecorderController:
         _latest_frames: cam_name → ndarray RGB（Task 5 填充，Task 3 读取）。
         _recorder_thread: 录制器线程（Task 5 接入）。
         _record_args: attach_record_args 保存的录制参数字典。
-        _should_stop: 后台线程退出标志。
+        _should_stop: 后台线程退出标志（仅 _record_main 命令循环用）。
         _frame_count: 当前 episode 已录帧数（status_snapshot 暴露）。
         _duration_sec: 当前 episode 已录时长（秒）（status_snapshot 暴露）。
+        _first_cam: cam_names[0]，用于 frame_observer 判断「新帧」（缺陷 2 修复）。
+        _record_t0: 每条 episode 录制起点时间戳（monotonic）。
     """
 
     def __init__(self, events: dict, *, fps: float = 30.0) -> None:
@@ -85,10 +99,14 @@ class RecorderController:
         # Task 5 接入录制器线程
         self._recorder_thread: Optional[threading.Thread] = None
         self._record_args: Optional[dict] = None
+        # _should_stop 仅用于 _record_main 命令消费循环的退出
         self._should_stop: bool = False
         # 当前 episode 进度（status_snapshot 暴露给 Task 4 前端）
         self._frame_count: int = 0
         self._duration_sec: float = 0.0
+        # 缺陷 2：记录第一路相机名和录制起点（attach_record_args / _handle_start_cmd 填充）
+        self._first_cam: Optional[str] = None
+        self._record_t0: float = 0.0
 
     # ---------- 按钮动作（写 events dict，等价键盘输入） ----------
 
@@ -241,6 +259,8 @@ class RecorderController:
             reset_fn=reset_fn,
             reset_wait=reset_wait,
         )
+        # 缺陷 2：记录第一路相机名，用于 frame_observer 判断「新帧」
+        self._first_cam = cam_names[0] if cam_names else None
 
     def start(self) -> None:
         """启动后台录制线程（_record_main 消费命令队列）。
@@ -285,23 +305,6 @@ class RecorderController:
             self._frame_count = 0
             self._duration_sec = 0.0
 
-    def _make_stop_flag(self):
-        """返回传给 run_episodes 的 stop_flag callable。
-
-        组合 exit_early / stop_recording（events dict）和 _should_stop（UI 全局退出），
-        与 EpisodeDecider.episode_stop_flag() 等价 + 额外 UI 全局兜底。
-        """
-        events = self._events
-
-        def _flag():
-            return bool(
-                events.get("exit_early")
-                or events.get("stop_recording")
-                or self._should_stop
-            )
-
-        return _flag
-
     def _record_main(self) -> None:
         """后台录制线程主循环：消费命令队列，串行执行 start/home 命令。
 
@@ -324,7 +327,17 @@ class RecorderController:
                 log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
 
     def _handle_start_cmd(self) -> None:
-        """处理 'start' 命令：调用 run_episodes_fn 执行录制。"""
+        """处理 'start' 命令：调用 run_episodes_fn 执行录制。
+
+        缺陷 1 修复：UI 模式复用 EpisodeDecider，与终端键盘模式逐字等价。
+          - EpisodeDecider(self._events) 驱动 decide 闭包
+          - stop_flag = dec.episode_stop_flag()（由 EpisodeDecider 提供）
+          - stop 不 reset（保留全局停止标志让 run_episodes 跳出循环）
+        缺陷 2 修复：frame_observer 接线 frame_count / duration_sec。
+          - 仅当 cam == self._first_cam 时计为新帧，避免多路相机重复计数
+          - 录制起点 _record_t0 在首帧到达时记录
+          - decide 闭包在每条 ep 决策后 reset 进度计数器
+        """
         if self._record_args is None:
             log.error("[RecorderController] attach_record_args 未调用，无法 start")
             return
@@ -332,9 +345,42 @@ class RecorderController:
         args = self._record_args
         run_fn = args["run_episodes_fn"]
 
-        # frame_observer：每帧每路 cam 写入 latest_frames 缓存（Task 3 预览路由读取）
-        def _frame_obs(cam_name: str, img: "np.ndarray") -> None:
-            self.update_latest_frame(cam_name, img)
+        # 缺陷 1 修复：构造 EpisodeDecider，与终端键盘模式写法逐字等价
+        dec = EpisodeDecider(self._events)
+
+        # 缺陷 2 修复：帧计数状态（闭包共享）
+        frame_state = {"count": 0, "t0": None}
+
+        # 缺陷 2 修复：frame_observer 接线 frame_count / duration_sec
+        first_cam = self._first_cam
+
+        def _frame_obs(cam: str, img: "np.ndarray") -> None:
+            # 每帧更新预览缓存（所有相机）
+            self.update_latest_frame(cam, img)
+            # 仅 first_cam 计为新帧，避免多路相机重复计数
+            if cam == first_cam:
+                now = time.monotonic()
+                if frame_state["t0"] is None:
+                    # 首帧到达时记录录制起点
+                    frame_state["t0"] = now
+                frame_state["count"] += 1
+                elapsed = now - frame_state["t0"]
+                self.update_recording_progress(
+                    frame_count=frame_state["count"],
+                    duration_sec=elapsed,
+                )
+
+        # 缺陷 1 修复：decide 闭包复用 EpisodeDecider，与 run_record_hdf5.main 写法等价
+        def decide(ep):
+            action = dec.decide_after_episode()
+            # stop 不 reset：stop_recording 是全局停止标志，保留让 run_episodes 跳出循环
+            if action in ("keep", "discard"):
+                dec.reset_episode_flags()
+            # 缺陷 2 修复：每条 ep 决策后重置进度计数，下一条 ep 从 0 计
+            self.reset_recording_progress()
+            frame_state["count"] = 0
+            frame_state["t0"] = None
+            return action
 
         try:
             run_fn(
@@ -350,10 +396,11 @@ class RecorderController:
                 oc2base_R=args["oc2base_R"],
                 vr_source=args["vr_source"],
                 episodes=args["episodes"],
-                decide=lambda ep: "keep",  # UI 模式：由按钮事件控制，decide 默认 keep
+                decide=decide,
                 reset_fn=args["reset_fn"],
                 reset_wait=args["reset_wait"],
-                stop_flag=self._make_stop_flag(),
+                # 缺陷 1 修复：stop_flag 由 EpisodeDecider 提供（不再用 _make_stop_flag）
+                stop_flag=dec.episode_stop_flag(),
                 frame_observer=_frame_obs,
             )
         except Exception as exc:
