@@ -18,6 +18,16 @@ record:
   # §11.2 色彩通道序预检（RealSense BGR vs RGB 误判 guard）; false 关闭
   color_preflight: true
 
+  # Phase E Web UI 配置段（默认 enabled: false = 键盘模式，不影响现有 run_record.py 入口）
+  ui:
+    enabled: false              # true → 走 UI 模式（新入口 run_record_hdf5_ui.py）; false = 键盘模式（现有 run_record）
+    host: "0.0.0.0"             # Flask 绑定 IP; 本机访问可改 "127.0.0.1"，远程访问保持 "0.0.0.0"
+    port: 5055                  # Flask 端口（避开 polymetis 50051 / zerorpc 4242 / gripper 50052）
+    preview_max_w: 320          # 预览图像最大宽度（像素）; 实际按原始比例等比缩放
+    preview_max_h: 240          # 预览图像最大高度（像素）
+    preview_quality: 60         # JPEG 预览压缩质量（1-100）; 值越低带宽越低
+    status_poll_hz: 30          # 前端状态轮询频率参考（前端 setInterval 当前写死 33ms=~30Hz）
+
   # 深度相机采集开关——占位至 Phase D，不写 hdf5 不进 schema
   depth:
     enabled: false
