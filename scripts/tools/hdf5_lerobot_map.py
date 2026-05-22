@@ -62,9 +62,17 @@ def build_feature_specs(cam_names, cam_hw=None):
 
 
 def _decode(jpeg_bytes):
-    """解码 vlen jpeg bytes → RGB HWC numpy array。"""
+    """解码 vlen jpeg bytes → RGB HWC numpy array。
+
+    Raises:
+        ValueError: jpeg 数据损坏，cv2.imdecode 返回 None 时抛出。
+    """
     arr = np.frombuffer(bytes(jpeg_bytes), np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR HWC
+    if img is None:
+        raise ValueError(
+            f"cv2.imdecode 返回 None：jpeg 数据损坏或格式不支持（数据长度 {len(arr)} 字节）"
+        )
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
@@ -82,11 +90,26 @@ def build_state_array(aligned: dict) -> np.ndarray:
 
     Returns:
         state_array (N, 14) float32
+
+    Raises:
+        ValueError: arm_joints/gripper_position_norm/arm_pose 长度不一致，或 gripper 不是 (N,1)
     """
     joints = aligned["arm_joints"]           # (N, 7)
     gripper = aligned["gripper_position_norm"]  # (N, 1)
     pose = aligned["arm_pose"]               # (N, 6) [px, py, pz, rx, ry, rz]
     N = len(joints)
+
+    # 轻量 shape 校验
+    if len(gripper) != N or len(pose) != N:
+        raise ValueError(
+            f"aligned 各模态长度不一致：arm_joints={N}, "
+            f"gripper_position_norm={len(gripper)}, arm_pose={len(pose)}"
+        )
+    if gripper.ndim != 2 or gripper.shape[1] != 1:
+        raise ValueError(
+            f"gripper_position_norm 应为 (N, 1) 二维数组，实际 shape: {gripper.shape}"
+        )
+
     state = np.empty((N, STATE_DIM), dtype=np.float32)
     state[:, 0:7] = joints.astype(np.float32)
     state[:, 7] = gripper[:, 0].astype(np.float32)
@@ -100,6 +123,7 @@ def build_action_array(state: np.ndarray) -> np.ndarray:
 
     action[i] = state[i+1]（i < N-1）；
     action[N-1] = state[N-1]（末帧复制，与 realman 行为一致）。
+    N=0 时直接返回空数组，不执行末帧复制。
 
     Args:
         state: observation.state 数组 (N, 14) float32
@@ -108,6 +132,11 @@ def build_action_array(state: np.ndarray) -> np.ndarray:
         action_array (N, 14) float32
     """
     N = state.shape[0]
+    assert state.shape[1] == ACTION_DIM, (
+        f"state 列数应为 ACTION_DIM={ACTION_DIM}，实际: {state.shape[1]}"
+    )
+    if N == 0:
+        return np.empty((0, ACTION_DIM), dtype=np.float32)
     action = np.empty_like(state)
     if N > 1:
         action[:-1] = state[1:]   # next-state
@@ -117,6 +146,10 @@ def build_action_array(state: np.ndarray) -> np.ndarray:
 
 def episode_to_lerobot_arrays(aligned: dict, h5, cam_names: list, task: str = "task"):
     """将 aligned dict + hdf5 图像数据转换为整个 episode 的 lerobot 数组。
+
+    图像读取使用 aligned["anchor_indices"] 作为原始 hdf5 图像数组的下标索引，
+    确保 drop 模式下图像与 state/action 时间上对齐（每个输出帧 i 的图像来自
+    原始下标 anchor_indices[i]，而非简单的 ds[i]）。
 
     这是核心 per-episode 接口（替代旧版 per-frame 的 hdf5_frame_to_lerobot）。
     调用方负责打开 h5py.File 并传入。
@@ -134,20 +167,31 @@ def episode_to_lerobot_arrays(aligned: dict, h5, cam_names: list, task: str = "t
           "images" : {cam_name: list of np.ndarray HWC uint8} (N frames per cam)
           "task"   : str
           "N"      : int 帧数
+
+    Raises:
+        ValueError: 某相机 hdf5 图像帧数不足以覆盖 anchor_indices 最大值时抛出。
     """
     state = build_state_array(aligned)
     action = build_action_array(state)
     N = state.shape[0]
 
+    # anchor_indices：各输出帧在原始 hdf5 图像数组中的下标
+    # 旧 aligned dict（无此键）兼容：退化为 0..N-1
+    anchor_indices = aligned.get("anchor_indices", np.arange(N, dtype=np.intp))
+
     images = {}
     for c in cam_names:
         ds = h5[f"observations/camera/rgb/{c}/images"]
-        # 读全部图像（N 帧）；图像总数 >= N（anchor 决定 N）
-        n_img = min(N, ds.shape[0])
+        n_ds = ds.shape[0]
+        # 检查原始帧数足以覆盖所有 anchor_indices
+        if len(anchor_indices) > 0 and int(anchor_indices.max()) >= n_ds:
+            raise ValueError(
+                f"相机 {c!r} 的 hdf5 图像帧数 {n_ds} 不足以覆盖 "
+                f"anchor_indices 最大值 {int(anchor_indices.max())}（0-based）"
+            )
         imgs = []
-        for i in range(n_img):
-            imgs.append(_decode(ds[i]))
-        # 若 aligned N < 图像总帧数（drop 模式），仅取 n_img 帧
+        for idx in anchor_indices:
+            imgs.append(_decode(ds[int(idx)]))
         images[c] = imgs
 
     return {

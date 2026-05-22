@@ -20,6 +20,9 @@
 返回值（align_by_image_timestamp）：dict[str, np.ndarray]，键含：
   - "anchor_ts"            : (N_out,) 锚时间轴
   - "anchor_stale"         : (N_out,) bool，锚帧 stale 标记（drop 后全 False）
+  - "anchor_indices"       : (N_out,) int，各输出帧在原始图像时间戳序列中的下标
+                             interpolate/keep 模式 = np.arange(N_anchor)；
+                             drop 模式 = np.where(~anchor_stale_orig)[0]（保留帧的原始下标）
   - "arm_joints"           : (N_out, 7) float64
   - "arm_joint_vel"        : (N_out, 7) float64
   - "arm_pose"             : (N_out, 6) float64（pos 线性 + rot SLERP）
@@ -201,7 +204,8 @@ def align_by_image_timestamp(
         cam_anchor: 锚相机名（None 表示取第一个相机按字典序）
 
     Returns:
-        dict[str, np.ndarray]，包含各模态对齐后的数组（见模块文档）
+        dict[str, np.ndarray]，包含各模态对齐后的数组（见模块文档），
+        额外包含 "anchor_indices" 键：各输出帧在原始图像时间戳序列中的下标。
 
     Raises:
         ValueError: 如果 on_stale 无效、相机不存在、数据为空等
@@ -243,16 +247,19 @@ def align_by_image_timestamp(
         hifreq_pose = f["observations/state_hifreq/pose"][...]
         hifreq_ts = f["observations/state_hifreq/timestamp"][...]
 
-    # --- on_stale 处理：确定锚时间轴 ---
+    # --- on_stale 处理：确定锚时间轴与 anchor_indices ---
+    N_anchor = len(anchor_ts)
     if on_stale == "drop":
-        # 丢弃 stale 锚帧
+        # 丢弃 stale 锚帧；anchor_indices 为被保留帧的原始下标
         keep_mask = ~anchor_stale
         anchor_ts_use = anchor_ts[keep_mask]
         anchor_stale_out = anchor_stale[keep_mask]  # 全 False
+        anchor_indices = np.where(keep_mask)[0].astype(np.intp)
     else:
-        # interpolate / keep：保留所有锚帧
+        # interpolate / keep：保留所有锚帧；anchor_indices 即 0..N_anchor-1
         anchor_ts_use = anchor_ts
         anchor_stale_out = anchor_stale
+        anchor_indices = np.arange(N_anchor, dtype=np.intp)
 
     if len(anchor_ts_use) == 0:
         raise ValueError("锚时间轴在 on_stale='drop' 后为空（所有帧都是 stale）")
@@ -291,6 +298,7 @@ def align_by_image_timestamp(
     return {
         "anchor_ts": anchor_ts_use,
         "anchor_stale": anchor_stale_out,
+        "anchor_indices": anchor_indices,
         "arm_joints": interp_joints,
         "arm_joint_vel": interp_joint_vel,
         "arm_pose": interp_pose,

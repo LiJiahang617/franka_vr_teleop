@@ -702,3 +702,88 @@ class TestSlerpUnwrap:
         assert np.all(diffs >= -1e-10), (
             f"unwrap 后 rx 仍不单调：min diff={diffs.min():.2e}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 新增测试（Codex 审查）：anchor_indices 键
+# ---------------------------------------------------------------------------
+
+class TestAnchorIndices:
+    """验证 align_by_image_timestamp 返回的 anchor_indices 键正确性。"""
+
+    def test_interpolate_anchor_indices_is_arange(self, tmp_path):
+        """interpolate 模式：anchor_indices 应等于 np.arange(N_anchor)。"""
+        path = str(tmp_path / "ep.h5")
+        _write_v2_synthetic(path, N=10, stale_indices={"wrist": [2, 5]})
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+
+        assert "anchor_indices" in aligned, "aligned dict 缺少 'anchor_indices' 键"
+        expected = np.arange(10, dtype=np.intp)
+        np.testing.assert_array_equal(
+            aligned["anchor_indices"], expected,
+            err_msg="interpolate 模式 anchor_indices 应为 np.arange(N_anchor)"
+        )
+
+    def test_keep_anchor_indices_is_arange(self, tmp_path):
+        """keep 模式：anchor_indices 应等于 np.arange(N_anchor)。"""
+        path = str(tmp_path / "ep.h5")
+        _write_v2_synthetic(path, N=8, stale_indices={"wrist": [1]})
+
+        aligned = align_by_image_timestamp(path, on_stale="keep")
+
+        assert "anchor_indices" in aligned, "aligned dict 缺少 'anchor_indices' 键"
+        expected = np.arange(8, dtype=np.intp)
+        np.testing.assert_array_equal(
+            aligned["anchor_indices"], expected,
+            err_msg="keep 模式 anchor_indices 应为 np.arange(N_anchor)"
+        )
+
+    def test_drop_anchor_indices_correct_original_indices(self, tmp_path):
+        """drop 模式：anchor_indices 应为被保留帧的原始下标数组。"""
+        path = str(tmp_path / "ep.h5")
+        stale = [2, 5, 8]
+        _write_v2_synthetic(path, N=10, stale_indices={"wrist": stale})
+
+        aligned = align_by_image_timestamp(path, on_stale="drop")
+
+        assert "anchor_indices" in aligned, "aligned dict 缺少 'anchor_indices' 键"
+        # 保留帧原始下标 = 所有下标中不在 stale 列表的
+        expected = np.array([i for i in range(10) if i not in stale], dtype=np.intp)
+        np.testing.assert_array_equal(
+            aligned["anchor_indices"], expected,
+            err_msg=f"drop 模式 anchor_indices 应为 {expected}，实际: {aligned['anchor_indices']}"
+        )
+
+    def test_drop_no_stale_anchor_indices_equals_arange(self, tmp_path):
+        """drop 模式且无 stale 帧：anchor_indices == np.arange(N)。"""
+        path = str(tmp_path / "ep.h5")
+        _write_v2_synthetic(path, N=6)
+
+        aligned = align_by_image_timestamp(path, on_stale="drop")
+
+        expected = np.arange(6, dtype=np.intp)
+        np.testing.assert_array_equal(
+            aligned["anchor_indices"], expected,
+            err_msg="无 stale 的 drop 模式 anchor_indices 应为 np.arange(N)"
+        )
+
+    def test_drop_anchor_indices_length_matches_output(self, tmp_path):
+        """drop 模式：anchor_indices 长度应等于输出帧数 N_out。"""
+        path = str(tmp_path / "ep.h5")
+        _write_v2_synthetic(path, N=10, stale_indices={"wrist": [0, 3, 7]})
+
+        aligned = align_by_image_timestamp(path, on_stale="drop")
+
+        assert len(aligned["anchor_indices"]) == len(aligned["anchor_ts"]), (
+            "anchor_indices 长度应与 anchor_ts 长度一致"
+        )
+
+    def test_anchor_indices_in_all_keys(self, tmp_path):
+        """anchor_indices 应出现在全键集中（TestOutputKeys 的补充）。"""
+        path = str(tmp_path / "ep.h5")
+        _write_v2_synthetic(path, N=5)
+
+        aligned = align_by_image_timestamp(path, on_stale="interpolate")
+
+        assert "anchor_indices" in aligned
