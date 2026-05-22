@@ -9,6 +9,9 @@ Flask app 工厂函数。
 2. HTML 模板内 JS 字符串中的换行必须用 \\\\n，禁止 Python 三引号字面量内的真换行流入 JS
    （lesson 2026-05-04-python-triple-quote-js-newline-trap）
 """
+import os
+import importlib.util
+
 from flask import Flask, jsonify
 
 # 负载标定占位路由的引导文案（修订 B）
@@ -17,6 +20,15 @@ _PAYLOAD_CALIB_GUIDANCE = (
     "请在 Franka Desk 的负载标定向导中完成末端负载（质量/质心/惯量）设置。"
     "后续若 franka_interface_server 暴露 set_load 接口，将接入真实功能。"
 )
+
+# 动态加载同包 preview 模块（与其他模块保持一致的加载方式）
+_UI_DIR = os.path.dirname(os.path.abspath(__file__))
+_preview_spec = importlib.util.spec_from_file_location(
+    "ui_preview", os.path.join(_UI_DIR, "preview.py")
+)
+_preview_mod = importlib.util.module_from_spec(_preview_spec)
+_preview_spec.loader.exec_module(_preview_mod)
+encode_preview_base64 = _preview_mod.encode_preview_base64
 
 
 def build_app(controller=None) -> Flask:
@@ -124,5 +136,27 @@ def build_app(controller=None) -> Flask:
             "supported": False,
             "guidance": _PAYLOAD_CALIB_GUIDANCE,
         })
+
+    # ---------- Task 3：相机预览路由 ----------
+
+    @app.route("/api/preview/<string:cam>", methods=["GET"])
+    def _api_preview(cam):
+        """返回指定相机最新帧的 base64 jpeg data-url（JSON）。
+
+        从 controller.get_latest_frame(cam) 取帧，编码为 ≤320×240 jpeg q60。
+        - controller=None → 503（_require_controller 统一处理）
+        - 无帧（帧缓存为空）→ 404
+        - 有帧 → 200 JSON {"cam": cam, "data_url": "data:image/jpeg;base64,..."}
+
+        不直接调 robot.get_observation()，守坑 7（帧由录制器主循环 hook 写入缓存）。
+        """
+        err = _require_controller()
+        if err is not None:
+            return err
+        arr = controller.get_latest_frame(cam)
+        if arr is None:
+            return jsonify({"cam": cam, "error": "no_frame"}), 404
+        data_url = encode_preview_base64(arr, max_w=320, max_h=240, quality=60)
+        return jsonify({"cam": cam, "data_url": data_url})
 
     return app
