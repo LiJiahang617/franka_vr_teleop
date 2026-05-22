@@ -83,7 +83,7 @@ python scripts/tools/hdf5_to_lerobot_v21.py \
 ### 5. 可视化
 
 ```bash
-franka-visualize   # 按 record_cfg.yaml 的 visualize 段配置数据集
+franka-visualize   # 按 record_cfg_unityvr.yaml 的 visualize 段配置数据集
 ```
 
 ---

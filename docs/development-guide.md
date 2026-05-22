@@ -44,11 +44,11 @@ pip install -e lerobot_teleoperator_franka # 子包②
 ```
 franka_hdf5_schema.py         # schema 冻结契约（仓库根 loose 模块）
 scripts/
-  core/      录制/回放/训练/可视化入口 + 录制核心模块（见 architecture.md §5）
+  core/      录制/回放/可视化/复位入口 + 录制核心模块（见 architecture.md §5）
   tools/     hdf5→lerobot 转换器、数据集检查
   services/  三进程服务启动包装脚本
-  config/    record_cfg*.yaml / train_cfg.yaml
-  utils/     关节 offset 标定
+  config/    record_cfg_unityvr.yaml（Route B 录制配置）
+  utils/     数据集辅助工具
   help/      franka-help
   ui/        数采 Web UI Flask app（控制面板、状态机、预览编码、HTML 模板）
 lerobot_robot_franka/         子包①：Franka Robot 接口 + zerorpc server/client
@@ -74,9 +74,9 @@ cd /home/ubuntu/Desktop/jhli/lerobot_franka_teleop
 python -m pytest tests/ -q
 ```
 
-当前共 **398 个用例**。覆盖范围：schema 校验、hdf5 writer（同步/异步）、async saver、preflight（夹爪/色彩）、record params、record loop、episode keyboard、unityvr mapping、vr align、unity vr reader、v21 转换器（meta/parquet/video/structure-diff/cli）、路径一致性、import 顺序守门、record_cfg yaml 解析等。
+当前共 **397 个用例**。覆盖范围：schema 校验、hdf5 writer（同步/异步）、async saver、preflight（夹爪/色彩）、record params、record loop、episode keyboard、unityvr mapping、vr align、unity vr reader、v21 转换器（meta/parquet/video/structure-diff/cli）、路径一致性、import 顺序守门、record_cfg yaml 解析等。
 
-新增/修改纯逻辑代码时**必须**补充对应 `tests/test_*.py`，并保证 398（或新增后总数）全绿。
+新增/修改纯逻辑代码时**必须**补充对应 `tests/test_*.py`，并保证 397（或新增后总数）全绿。
 
 ---
 
@@ -152,19 +152,14 @@ bash debug/franka_clean_restart.sh   # 清理 → 起臂 → 验 → 起 zerorpc
 
 | 命令 | 入口 |
 |---|---|
-| `franka-record` | `scripts.core.run_record:main`（历史 LeRobot 直写录制） |
 | `franka-replay` | `scripts.core.run_replay:main` |
 | `franka-visualize` | `scripts.core.run_visualize:main` |
 | `franka-reset` | `scripts.core.reset_robot:main` |
-| `franka-train` | `scripts.core.run_train:main` |
 | `franka-help` | `scripts.help.help_info:main` |
-| `utils-joint-offsets` | `scripts.utils.teleop_joint_offsets:main` |
 | `tools-check-dataset` | `scripts.tools.check_dataset_info:main` |
 | `tools-check-rs` | `scripts.tools.rs_devices:main` |
 
-`scripts=[...]` 另装两个 shell 工具：`map_gripper.sh`、`check_master_port.sh`。
-
-> **待确认**：`run_record_hdf5.py`（Route B hdf5 录制入口）与 `hdf5_to_lerobot*.py` 转换器当前未注册为 `console_scripts`，需用 `python scripts/core/run_record_hdf5.py ...` 直接调用。新增入口时在 `setup.py` 的 `entry_points` 里补一行并重装。
+> **注意**：Route B 录制入口（`run_record_hdf5.py` / `run_record_hdf5_ui.py`）与转换器（`hdf5_to_lerobot*.py`）未注册为 `console_scripts`，需用 `python scripts/core/run_record_hdf5.py ...` 直接调用。新增入口时在 `setup.py` 的 `entry_points` 里补一行并重装。
 
 ---
 

@@ -42,7 +42,6 @@
 lerobot_franka_teleop/
 ├── franka_hdf5_schema.py          # franka-hdf5-v1 schema 契约 + validate_episode（仓库根 loose 模块）
 ├── setup.py                       # 主包安装 + console_scripts 入口
-├── stage3_teleop.py               # Stage3 安全遥操作脚本（初始锚定方案，独立于录制链路）
 ├── NOTICE.md                      # 第三方代码出处声明
 │
 ├── lerobot_robot_franka/          # 子包①：Franka 机器人侧（LeRobot Robot 接口实现）
@@ -59,16 +58,14 @@ lerobot_franka_teleop/
 │       ├── unityvr_mapping.py              # 世界系 → base 的纯 delta 映射（可单测）
 │       ├── unity_vr_reader.py              # adb logcat 读取 Unity app 的 VR 位姿
 │       ├── vr_align.py                     # VR↔Franka 坐标系对齐（Kabsch，纯数学）
-│       ├── oculus_teleop.py / spacemouse_teleop.py / dynamixel_teleop.py  # 历史遥操方式
-│       ├── teleop_factory.py               # create_teleop 工厂
-│       └── oculus/                         # oculus_reader（第三方）
+│       └── teleop_factory.py               # create_teleop 工厂
 │
 ├── scripts/
 │   ├── core/                      # 录制 / 回放 / 训练 / 可视化核心入口
 │   ├── tools/                     # hdf5→lerobot 转换器、数据集检查工具
 │   ├── services/                  # 三进程服务的启动包装脚本（*.sh）
-│   ├── config/                    # record_cfg*.yaml / train_cfg.yaml
-│   ├── utils/                     # 关节 offset 标定等工具
+│   ├── config/                    # record_cfg_unityvr.yaml（Route B 录制配置）
+│   ├── utils/                     # 数据集辅助工具
 │   └── help/                      # franka-help 命令
 │
 ├── tests/                         # pytest 测试（317 用例，纯逻辑离线可跑）
@@ -79,7 +76,7 @@ lerobot_franka_teleop/
 │   ├── development-guide.md       # 开发说明
 │   ├── data-format.md             # franka-hdf5-v1 schema 说明
 │   └── README.md                  # docs 索引
-└── assets/                        # URDF、图片
+└── assets/                        # 图片（说明文档用图）
 ```
 
 > 三个 Python 包：主包 `lerobot_franka_teleop`（含 `scripts/`），子包 `lerobot_robot_franka`、`lerobot_teleoperator_franka`。三者均以 editable 方式安装在 venv `envs/franka-teleop` 中。
@@ -98,7 +95,7 @@ Franka 实时控制由 [Polymetis](https://polymetis-docs.github.io/) 提供。P
 | `_run_zerorpc_iface.sh` | **4242** | `launch_server.py`（`FrankaInterfaceServer`） | zerorpc 接口层：包装 polymetis `RobotInterface` / `GripperInterface`，对采集侧暴露 RPC。 |
 | `_run_gripper.sh` | **50052** | `launch_gripper.py gripper=franka_hand` | Franka Hand 夹爪服务（polymetis gripper server）。 |
 
-> `_run_stage3_teleop.sh` 不属于这三进程，它在 `franka-teleop` 环境启动独立的 `stage3_teleop.py` 安全遥操作脚本。
+> 三进程启动时序：先臂（50051）→ 再 zerorpc（4242）→ 再夹爪（50052）。
 
 ### 进程拓扑
 
@@ -200,8 +197,7 @@ Franka 实时控制由 [Polymetis](https://polymetis-docs.github.io/) 提供。P
 
 | 模块 | 作用 |
 |---|---|
-| `run_record_hdf5.py` | **录制主入口**。复用 `run_record.py` 的 robot/teleop/相机构造，sink 替换为 `write_episode` 写 `franka-hdf5-v1`。流程：解析 cfg → 构造 robot/teleop → 预检门 → 键盘监听 → `run_episodes` 录制循环 → `AsyncEpisodeSaver` 异步落盘。 |
-| `run_record.py` | 历史录制入口（直写 LeRobotDataset）。`run_record_hdf5.py` 与之并存、不改其逻辑，仅复用 `RecordConfig`。 |
+| `run_record_hdf5.py` | **录制主入口（终端键盘模式）**。解析 cfg → 构造 robot/teleop → 预检门 → 键盘监听 → `run_episodes` 录制循环 → `AsyncEpisodeSaver` 异步落盘，写 `franka-hdf5-v1`。 |
 | `record_params.py` | 录制超参纯函数（可单测、无硬件依赖）：`resolve_record_fps`（fps 单一来源）、`extract_joint_vel`、`realsense_fps`（float→int）、`parse_reset_config`（严格 bool 解析防 yaml 引号陷阱）、`resolve_record_overrides`（CLI None 仅覆盖）。 |
 | `hdf5_writer.py` | `write_episode` 模块级落盘函数 + `HDF5EpisodeWriter` 类。按 `franka-hdf5-v1` 缓冲帧、整体写盘、末尾 `validate_episode` 自检。同步/异步路径共用同一实现。 |
 | `async_saver.py` | `AsyncEpisodeSaver`：有界队列 + 后台单线程。`submit()` 入队即返回；队列满抛 `QueueFullError`（不静默丢）；`close()` 无超时阻塞等排空（数据零丢优先）。 |
@@ -210,7 +206,8 @@ Franka 实时控制由 [Polymetis](https://polymetis-docs.github.io/) 提供。P
 | `schema_loader.py` | 加载仓库根 loose 模块 `franka_hdf5_schema.py` 的单一入口，复用 `sys.modules` 缓存。 |
 | `paths.py` | 集中可配路径/端口常量（可被环境变量覆盖），整合期硬编码路径的单一真值。 |
 | `run_visualize.py` | 数据集可视化入口（`franka-visualize`）。 |
-| `run_replay.py` / `run_train.py` / `reset_robot.py` | 回放 / 训练 / 复位入口（历史链路）。 |
+| `run_replay.py` | 数据集回放入口（`franka-replay`）。 |
+| `reset_robot.py` | 机械臂复位入口（`franka-reset`）。 |
 
 ---
 

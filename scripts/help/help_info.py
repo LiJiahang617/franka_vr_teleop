@@ -4,28 +4,20 @@ def main():
  Franka Teleoperation Utilities - Command Reference
 ==================================================
 
-Core Commands:
-  franka-record           Record teleoperation dataset
-  franka-replay           Replay a recorded dataset
-  franka-visualize        Visualize recorded dataset
-  franka-reset           Reset the robot to initial state
-  franka-train          Train a policy on the recorded dataset
+录制命令（直接调用脚本）：
+  python run_record_hdf5.py     终端模式录制（hdf5-v1 格式）
+  python run_record_hdf5_ui.py  Web UI 模式录制
 
-Utility Commands:
-  utils-joint-offsets   Compute joint offsets for teleoperation
+数据工具：
+  franka-replay           回放已录制的数据集
+  franka-visualize        可视化已录制的数据集
+  franka-reset            将机械臂复位到初始姿态
 
-Tool Commands:
-  tools-check-dataset   Check local dataset information
-  tools-check-rs        Retrieve connected RealSense camera serial numbers
-
-Shell Tools:
-  map_gripper.sh        Map Gripper Serial Port
-  check_master_port.sh  Get the Master Arm's Persistent Serial Identifier
-
-Test Commands:
-  test-gripper-ctrl     Run gripper control command (operate the gripper)
+辅助工具：
+  tools-check-dataset     查看本地数据集信息
+  tools-check-rs          获取已连接 RealSense 相机序列号
 
 --------------------------------------------------
- Tip: Use 'franka-help' anytime to see this summary.
+ 提示：随时使用 'franka-help' 查看本摘要。
 ==================================================
 """)
