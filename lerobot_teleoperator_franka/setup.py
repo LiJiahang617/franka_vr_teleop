@@ -8,11 +8,7 @@ setup(
     author_email="shenzhaolong@buaa.edu.cn",
     packages=find_packages(),
     python_requires=">=3.10",
-    install_requires=[
-        "dynamixel_sdk",
-        "easyhid",
-        "placo"
-    ],
+    install_requires=[],
     classifiers=[
         "Programming Language :: Python :: 3",
         "Operating System :: OS Independent",
