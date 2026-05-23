@@ -19,6 +19,7 @@ import argparse
 import logging
 import os
 import sys
+import threading
 
 import numpy as np
 import yaml
@@ -253,23 +254,37 @@ def main():
         " （浏览器打开，急停在手）"
     )
 
-    try:
-        # 启动后台录制线程（等待 UI 发 'start' 命令）
-        controller.start()
-        controller.start_preview_sampler(robot.cameras)
-        # 阻塞在 Flask 服务器（threaded=True 多线程处理请求；use_reloader=False 防双进程触发硬件初始化两次）
-        app.run(
+    # 架构修订（2026-05-24）：Flask 移子线程，主线程跑命令消费循环
+    # 原因：原 controller daemon thread 跑 run_episodes 触发 zerorpc gevent
+    # thread-affinity 死锁（lesson 2026-05-24-phaseE-ui-zerorpc-gevent-daemon-thread.md）。
+    # zerorpc client 在 build_robot_and_teleop 主线程创建，必须由主线程消费命令。
+    flask_thread = threading.Thread(
+        target=app.run,
+        kwargs=dict(
             host=ui_cfg["host"],
             port=ui_cfg["port"],
             threaded=True,
             debug=False,
             use_reloader=False,
-        )
+        ),
+        daemon=True,
+        name="flask-server",
+    )
+    flask_thread.start()
+
+    try:
+        # prepare() 仅切状态机 INITIALIZING → WAITING（不启 daemon thread）
+        controller.prepare()
+        # preview sampler 用 daemon thread read cam（不调 zerorpc，OK）
+        controller.start_preview_sampler(robot.cameras)
+        # 主线程阻塞消费命令队列 — 所有 zerorpc 调用主线程发生，绕开 gevent thread-affinity
+        controller.consume_commands_blocking()
+    except KeyboardInterrupt:
+        log.info("[UI] Ctrl+C，优雅退出")
     finally:
-        # 有序清理：先停录制线程 → 等 join → 再断硬件
+        # 有序清理：停 preview → 写 stop_recording 标志 → 断硬件
         controller.stop_preview_sampler()
         controller.stop_recording()
-        controller.wait_until_done(timeout=10)
         robot.disconnect()
         teleop.disconnect()
 

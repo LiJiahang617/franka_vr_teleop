@@ -20,7 +20,7 @@ record:
 
   # Phase E Web UI 配置段（默认 enabled: false = 键盘模式，不影响现有 run_record.py 入口）
   ui:
-    enabled: false              # true → 走 UI 模式（新入口 run_record_hdf5_ui.py）; false = 键盘模式（现有 run_record）
+    enabled: true               # true → 走 UI 模式（新入口 run_record_hdf5_ui.py）; false = 键盘模式（现有 run_record）
     host: "0.0.0.0"             # Flask 绑定 IP; 本机访问可改 "127.0.0.1"，远程访问保持 "0.0.0.0"
     port: 5055                  # Flask 端口（避开 polymetis 50051 / zerorpc 4242 / gripper 50052）
     preview_max_w: 320          # 预览图像最大宽度（像素）; 实际按原始比例等比缩放

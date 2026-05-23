@@ -332,22 +332,61 @@ class RecorderController:
         self._first_cam = cam_names[0] if cam_names else None
 
     def start(self) -> None:
-        """启动后台录制线程（_record_main 消费命令队列）。
+        """启动后台录制线程消费命令队列（兼容旧 API，单测用）。
 
-        attach_record_args 须在 start() 前调用。
-        线程为 daemon，进程退出时自动清理。
-        状态机：INITIALIZING → WAITING（就绪等用户点开始）。
+        ⚠️ 真机入口不要调此方法——daemon thread 调 zerorpc 会触发 gevent
+        thread-affinity 死锁（lesson 2026-05-24-phaseE-ui-zerorpc-gevent-daemon-thread.md）。
+        真机入口请用 `prepare()` + `consume_commands_blocking()` 组合。
+
+        状态机：INITIALIZING → WAITING。
         """
         self._should_stop = False
         self._recorder_thread = threading.Thread(
             target=self._record_main, daemon=True, name="recorder-main"
         )
         self._recorder_thread.start()
-        # 切到 WAITING 让 UI 看到「就绪」
         try:
             self._sm.transition(UIState.WAITING)
         except IllegalTransition as e:
             log.warning(f"[RecorderController] start() 状态切换失败: {e}")
+
+    def prepare(self) -> None:
+        """仅切状态机 INITIALIZING → WAITING，不启 daemon thread（真机入口用）。
+
+        与 `start()` 区别：本方法不启动 daemon，命令消费交给主线程
+        `consume_commands_blocking()` 处理。zerorpc 调用回到 client 创建
+        所在的主线程，绕开 gevent thread-affinity 死锁。
+        """
+        self._should_stop = False
+        try:
+            self._sm.transition(UIState.WAITING)
+        except IllegalTransition as e:
+            log.warning(f"[RecorderController] prepare() 状态切换失败: {e}")
+
+    def consume_commands_blocking(self) -> None:
+        """主线程阻塞消费命令队列（替代原 daemon thread `_record_main`）。
+
+        在入口主线程调用——Flask 已在子线程 serve，命令由 Flask handler 写
+        `_cmd_q`，本主循环消费。退出条件：`stop_recording()` 置位 `_should_stop=True`。
+
+        所有 zerorpc 调用（teleop / robot）都在主线程发生，与 zerorpc client
+        的 gevent Hub 同线程，绕开 thread-affinity 死锁。
+        """
+        log.info("[RecorderController] 主线程命令消费循环启动")
+        self._should_stop = False
+        while not self._should_stop:
+            try:
+                cmd = self._cmd_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if cmd == "start":
+                self._handle_start_cmd()
+            elif cmd == "home":
+                self._handle_home_cmd()
+            else:
+                log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
+        log.info("[RecorderController] 主线程命令消费循环退出")
 
     def wait_until_done(self, timeout: float = 5.0) -> None:
         """等待后台线程退出（join with timeout，无僵尸线程）。
