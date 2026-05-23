@@ -32,6 +32,14 @@ record:
   depth:
     enabled: false
 
+
+  # 控制器预检：录制前幂等启动 cartesian impedance controller
+  # 防止 _run_polymetis_rw.sh 后台异步启 controller 偶发性失败导致主循环 send_action 报 "no controller running"
+  controller_preflight:
+    enabled: true                                                          # false → 跳过控制器预检
+    polymetis_python: "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python"   # polymetis venv python 绝对路径
+    polymetis_conda_prefix: "/home/ubuntu/Desktop/jhli/envs/polymetis-local"        # CONDA_PREFIX 环境变量值
+
   # 高频关节状态采集——占位至 Phase D 同步重构，当前不采集
   state_hifreq:
     enabled: false
@@ -73,7 +81,7 @@ record:
       pos_axis_gain: [1.0, 1.0, 1.0]
       # §11.3 姿态每轴增益[rx,ry,rz]; 叠加在 pose_scaler[1] 之上, 不改方向/手性(§10.2(0) 红线)
       # 默认全1=等价历史 pose_scaler 行为; 某轴旋转钝→调大对应增益
-      rot_axis_gain: [1.0, 1.0, 1.0]
+      rot_axis_gain: [2.0, 2.0, 2.0]
     placo:
       visualize_placo: False
       placo_dt: 0.01
@@ -133,7 +141,7 @@ record:
 
   cameras:
     wrist_cam_serial: "419622073931" # 腕部相机序列号（手腕视角，跟随末端运动）; 参考: 243222071212 344322074412
-    exterior_cam_serial: "420122071361" # 外部相机序列号（全局视角，固定安装）; 参考: 243322071821 339322074423
+    exterior_cam_serial: "233622075512" # 外部相机序列号（全局视角，固定安装）; 参考: 243322071821 339322074423
     width: 424 # 图像宽度（像素）; RealSense 支持 424/640
     height: 240 # 图像高度（像素）; RealSense 支持 240/360
 

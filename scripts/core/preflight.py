@@ -351,6 +351,7 @@ def run_controller_preflight(
     poll: float = 0.1,
     polymetis_python: str = "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python",
     polymetis_conda_prefix: str = "/home/ubuntu/Desktop/jhli/envs/polymetis-local",
+    starter=None,  # Callable[[list, list], None]，None → 默认 subprocess 启动；测试可注入 mock
 ) -> Verdict:
     """录制前幂等启动 cartesian impedance controller。
 
@@ -370,6 +371,8 @@ def run_controller_preflight(
         poll: 轮询间隔(秒)
         polymetis_python: polymetis-local venv python 绝对路径
         polymetis_conda_prefix: polymetis-local CONDA_PREFIX 环境变量值
+        starter: Callable[[list, list], None]，接受 (Kx, Kxd) 参数；
+                 None → 默认 subprocess 启动；测试可注入 mock 函数避免真 subprocess
 
     Returns:
         Verdict(ok=True) 控制器就绪；Verdict(ok=False, reason=...) 失败有可行动指引。
@@ -379,29 +382,40 @@ def run_controller_preflight(
     if Kxd is None:
         Kxd = [1.0, 1.0, 1.0, 0.2, 0.2, 0.2]
 
-    # subprocess 调 polymetis-local Python(与 _run_polymetis_rw.sh 同款路径)
-    # 先 terminate_current_policy 干掉 Franka.connect 启动的 joint impedance（若有），
-    # 否则 start_cartesian 会与现有 policy 冲突卡死
-    code = (
-        "import torch\n"
-        "from polymetis import RobotInterface\n"
-        "r = RobotInterface(ip_address='localhost', enforce_version=False)\n"
-        "try:\n"
-        "    r.terminate_current_policy()\n"
-        "except Exception:\n"
-        "    pass\n"   # 无 policy 时 terminate 会抛，忽略
-        f"r.start_cartesian_impedance(Kx=torch.Tensor({Kx}), Kxd=torch.Tensor({Kxd}))\n"
-    )
-    env = os.environ.copy()
-    env["CONDA_PREFIX"] = polymetis_conda_prefix
+    if starter is None:
+        # subprocess 调 polymetis-local Python(与 _run_polymetis_rw.sh 同款路径)
+        # 先 terminate_current_policy 干掉 Franka.connect 启动的 joint impedance（若有），
+        # 否则 start_cartesian 会与现有 policy 冲突卡死
+        def starter(Kx_arg, Kxd_arg):
+            """默认 starter：subprocess 调 polymetis-local Python 启动 controller。"""
+            code = (
+                "import torch\n"
+                "from polymetis import RobotInterface\n"
+                "r = RobotInterface(ip_address='localhost', enforce_version=False)\n"
+                "try:\n"
+                "    r.terminate_current_policy()\n"
+                "except Exception:\n"
+                "    pass\n"   # 无 policy 时 terminate 会抛，忽略
+                f"r.start_cartesian_impedance(Kx=torch.Tensor({Kx_arg}), Kxd=torch.Tensor({Kxd_arg}))\n"
+            )
+            env = os.environ.copy()
+            env["CONDA_PREFIX"] = polymetis_conda_prefix
+            result = subprocess.run(
+                [polymetis_python, "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=15.0,
+                env=env,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"start_cartesian_impedance subprocess failed (rc={result.returncode}): "
+                    f"{result.stderr[-400:]}"
+                )
+
+    # 启动 controller（幂等：starter 内部处理 terminate + start_cartesian）
     try:
-        result = subprocess.run(
-            [polymetis_python, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=15.0,
-            env=env,
-        )
+        starter(Kx, Kxd)
     except subprocess.TimeoutExpired:
         return Verdict(
             ok=False,
@@ -415,16 +429,15 @@ def run_controller_preflight(
             ok=False,
             reason=(
                 f"polymetis-local Python 不存在: {polymetis_python}({e})；"
-                f"检查 venv 路径或传入 polymetis_python 参数"
+                f"检查 venv 路径或 yaml record.controller_preflight.polymetis_python"
             ),
         )
-    if result.returncode != 0:
-        stderr_tail = result.stderr[-400:] if result.stderr else "(no stderr)"
+    except Exception as e:
         return Verdict(
             ok=False,
             reason=(
-                f"启动 cartesian impedance controller 失败(rc={result.returncode}): "
-                f"{stderr_tail}；检查 polymetis 服务是否健康"
+                f"启动 cartesian impedance controller 失败: {e}；"
+                f"检查 polymetis 服务是否健康"
             ),
         )
 

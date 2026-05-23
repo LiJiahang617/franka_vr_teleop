@@ -429,3 +429,48 @@ def test_pos_axis_gain_nan_raises_at_config():
     m = _load_run_record()
     with pytest.raises(ValueError, match="有限"):
         m.RecordConfig(_minimal_cfg(uvr_overrides={"pos_axis_gain": [1.0, float("nan"), 1.0]}))
+
+
+# ================================================================
+# controller_preflight 配置解析测试
+# ================================================================
+
+def test_record_config_controller_preflight_defaults():
+    """yaml 缺 controller_preflight 段 → 默认 enabled=True + 默认路径。"""
+    m = _load_run_record()
+    rc = m.RecordConfig(_minimal_cfg())
+    assert hasattr(rc, "controller_preflight_enabled"), "RecordConfig 应有 controller_preflight_enabled"
+    assert rc.controller_preflight_enabled is True, f"默认应为 True，实际 {rc.controller_preflight_enabled!r}"
+    assert hasattr(rc, "controller_preflight_python"), "RecordConfig 应有 controller_preflight_python"
+    assert "polymetis" in rc.controller_preflight_python, (
+        f"默认 python 路径应含 polymetis，实际 {rc.controller_preflight_python!r}"
+    )
+    assert hasattr(rc, "controller_preflight_conda_prefix"), "RecordConfig 应有 controller_preflight_conda_prefix"
+
+
+def test_record_config_controller_preflight_disabled():
+    """yaml enabled=false → cfg.controller_preflight_enabled is False。"""
+    m = _load_run_record()
+    rc = m.RecordConfig(_minimal_cfg(rec_overrides={
+        "controller_preflight": {"enabled": False}
+    }))
+    assert rc.controller_preflight_enabled is False, (
+        f"enabled=false 应解析为 False，实际 {rc.controller_preflight_enabled!r}"
+    )
+
+
+def test_record_config_controller_preflight_custom_paths():
+    """yaml 自定义路径 → cfg 字段反映。"""
+    m = _load_run_record()
+    rc = m.RecordConfig(_minimal_cfg(rec_overrides={
+        "controller_preflight": {
+            "polymetis_python": "/opt/custom/venv/bin/python",
+            "polymetis_conda_prefix": "/opt/custom/venv",
+        }
+    }))
+    assert rc.controller_preflight_python == "/opt/custom/venv/bin/python", (
+        f"实际 {rc.controller_preflight_python!r}"
+    )
+    assert rc.controller_preflight_conda_prefix == "/opt/custom/venv", (
+        f"实际 {rc.controller_preflight_conda_prefix!r}"
+    )

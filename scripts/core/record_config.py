@@ -174,6 +174,20 @@ class RecordConfig:
             cfg.get("color_preflight"), default=True, key_name="record.color_preflight"
         )
 
+        # 控制器预检配置（严格解析；缺省向后兼容旧 yaml 无 controller_preflight 段）
+        cp_cfg = parse_section_dict(cfg.get("controller_preflight"), key_name="record.controller_preflight")
+        self.controller_preflight_enabled = parse_bool(
+            cp_cfg.get("enabled"), default=True, key_name="record.controller_preflight.enabled"
+        )
+        self.controller_preflight_python = str(
+            cp_cfg.get("polymetis_python") or
+            "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python"
+        )
+        self.controller_preflight_conda_prefix = str(
+            cp_cfg.get("polymetis_conda_prefix") or
+            "/home/ubuntu/Desktop/jhli/envs/polymetis-local"
+        )
+
         # Phase E Task 6: Web UI 配置段（严格解析，缺省全默认，向后兼容旧 yaml 无 ui 段）
         self.ui_config = _parse_ui_config(cfg.get("ui"))
 
