@@ -867,3 +867,112 @@ class TestSelectAnchorTs:
         anchor = fn(sw_ts, hw_ts)
         np.testing.assert_array_equal(anchor, sw_ts,
                                       err_msg="slope≈0 时应 fallback sw_ts")
+
+
+# ---------------------------------------------------------------------------
+# Task 6: _project_hw_to_monotonic + effector hw_timestamp 对齐
+# ---------------------------------------------------------------------------
+
+def _make_minimal_v2_episode(path, N, with_hw_ts=False, hw_ts_all_nan=False):
+    """创建最小 v2 ep，包含 align_by_image_timestamp 所需的全部字段。
+
+    Args:
+        path: 输出文件路径（pathlib.Path 或 str）
+        N: 帧数
+        with_hw_ts: 是否写入 observations/effector/hw_timestamp 字段
+        hw_ts_all_nan: with_hw_ts=True 时是否将 hw_timestamp 全设为 NaN
+    """
+    with h5py.File(str(path), "w") as f:
+        ts = np.linspace(1000.0, 1000.0 + N * 0.033, N, dtype=np.float64)
+        # arm
+        f.create_dataset("observations/arm/timestamp", data=ts)
+        f.create_dataset("observations/arm/joints", data=np.zeros((N, 7)))
+        f.create_dataset("observations/arm/joint_vel", data=np.zeros((N, 7)))
+        f.create_dataset("observations/arm/pose", data=np.zeros((N, 6)))
+        f.create_dataset("observations/arm/stale", data=np.zeros(N, dtype=bool))
+        # effector
+        f.create_dataset("observations/effector/timestamp", data=ts)
+        f.create_dataset("observations/effector/position", data=np.zeros((N, 1)))
+        f.create_dataset("observations/effector/position_norm",
+                         data=np.linspace(0.0, 1.0, N).reshape(-1, 1))
+        f.create_dataset("observations/effector/stale", data=np.zeros(N, dtype=bool))
+        # camera（只需 timestamp + stale；align 不读图像像素）
+        f.create_dataset("observations/camera/rgb/wrist/timestamp", data=ts)
+        f.create_dataset("observations/camera/rgb/wrist/stale", data=np.zeros(N, dtype=bool))
+        # action
+        f.create_dataset("action/timestamp", data=ts)
+        f.create_dataset("action/delta_ee_pose", data=np.zeros((N, 6)))
+        f.create_dataset("action/gripper_cmd", data=np.zeros((N, 1)))
+        # state_hifreq（M=0 占位）
+        f.create_dataset("observations/state_hifreq/timestamp", data=np.zeros(0))
+        f.create_dataset("observations/state_hifreq/joints", data=np.zeros((0, 7)))
+        f.create_dataset("observations/state_hifreq/joint_vel", data=np.zeros((0, 7)))
+        f.create_dataset("observations/state_hifreq/pose", data=np.zeros((0, 6)))
+        # 可选 hw_timestamp
+        if with_hw_ts:
+            hw = np.full(N, np.nan) if hw_ts_all_nan else (ts - 800.0)
+            f.create_dataset("observations/effector/hw_timestamp",
+                             data=hw.astype(np.float64))
+    return path
+
+
+def test_project_hw_to_monotonic_perfect_linear():
+    """硬件 ts 与 monotonic 完全线性时，投影后应等于 monotonic（slope=1）。"""
+    from tools.align_offline import _project_hw_to_monotonic
+    eff_mono = np.arange(10, dtype=np.float64) * 0.05 + 1000.0
+    eff_hw = np.arange(10, dtype=np.float64) * 0.05 + 200.0
+    projected = _project_hw_to_monotonic(eff_mono, eff_hw)
+    np.testing.assert_allclose(projected, eff_mono, atol=1e-3)
+
+
+def test_project_hw_to_monotonic_with_jitter_recovers():
+    """hw_ts 抖动 ±5ms 时，线性投影应给出平滑曲线，残差 < 10ms。"""
+    from tools.align_offline import _project_hw_to_monotonic
+    rng = np.random.default_rng(42)
+    eff_mono = np.linspace(1000.0, 1010.0, 100)
+    eff_hw_clean = np.linspace(200.0, 210.0, 100)
+    eff_hw = eff_hw_clean + rng.normal(0, 0.005, 100)
+    projected = _project_hw_to_monotonic(eff_mono, eff_hw)
+    residual = np.abs(projected - eff_mono)
+    assert residual.max() < 0.020, f"最大残差 {residual.max()*1000:.2f}ms 超过 20ms"
+
+
+def test_align_uses_hw_timestamp_when_available(tmp_path, caplog):
+    """hdf5 含 effector/hw_timestamp 时，align_by_image_timestamp 走精确路径。"""
+    import logging
+    ep = _make_minimal_v2_episode(tmp_path / "ep_with_hw.h5", N=20, with_hw_ts=True)
+    with caplog.at_level(logging.INFO, logger="tools.align_offline"):
+        aligned = align_by_image_timestamp(str(ep), on_stale="interpolate")
+    assert any(
+        "hw_timestamp" in rec.getMessage().lower()
+        and ("对齐" in rec.getMessage() or "align" in rec.getMessage().lower())
+        for rec in caplog.records
+    ), f"应 log 精确对齐路径，实际日志: {[r.getMessage() for r in caplog.records]}"
+    assert "gripper_position_norm" in aligned and aligned["gripper_position_norm"].shape[0] > 0
+
+
+def test_align_falls_back_when_hw_timestamp_missing(tmp_path, caplog):
+    """hdf5 无 effector/hw_timestamp → 退回旧路径 + info log。"""
+    import logging
+    ep = _make_minimal_v2_episode(tmp_path / "ep_no_hw.h5", N=20, with_hw_ts=False)
+    with caplog.at_level(logging.INFO, logger="tools.align_offline"):
+        aligned = align_by_image_timestamp(str(ep), on_stale="interpolate")
+    assert any(
+        "rebuild polymetis" in rec.getMessage().lower()
+        or "退回" in rec.getMessage()
+        or "无" in rec.getMessage()
+        or "无 effector hw_timestamp" in rec.getMessage()
+        for rec in caplog.records
+    ), f"应 info 提示退回，实际日志: {[r.getMessage() for r in caplog.records]}"
+
+
+def test_align_falls_back_when_hw_timestamp_all_nan(tmp_path, caplog):
+    """hdf5 有 effector/hw_timestamp 但全 NaN → 退回旧路径。"""
+    import logging
+    ep = _make_minimal_v2_episode(tmp_path / "ep_nan_hw.h5", N=20, with_hw_ts=True, hw_ts_all_nan=True)
+    with caplog.at_level(logging.WARNING, logger="tools.align_offline"):
+        aligned = align_by_image_timestamp(str(ep), on_stale="interpolate")
+    assert any(
+        "nan" in rec.getMessage().lower() or "退回" in rec.getMessage()
+        for rec in caplog.records
+    ), f"全 NaN 应退回，实际日志: {[r.getMessage() for r in caplog.records]}"

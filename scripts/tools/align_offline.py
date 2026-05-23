@@ -38,11 +38,14 @@
 对应 spec：docs/superpowers/specs/2026-05-19-franka-datacollection-completion-design.md §10.4
 """
 import argparse
+import logging
 import sys
 
 import h5py
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +249,34 @@ def _select_anchor_ts(
     return sw_ts
 
 
+
+def _project_hw_to_monotonic(
+    eff_ts_monotonic: np.ndarray,
+    eff_ts_hardware: np.ndarray,
+) -> np.ndarray:
+    """用线性回归把硬件时戳轴映射到 monotonic 时戳轴。
+
+    Args:
+        eff_ts_monotonic: (N,) effector 字段 polymetis 接收时刻（monotonic 秒）
+        eff_ts_hardware:  (N,) libfranka 硬件 push 物理时戳（since robot start 秒）
+
+    Returns:
+        (N,) 投影到 monotonic 域的精确时戳
+
+    Raises:
+        ValueError: 输入长度不一致或 < 2 帧
+    """
+    if eff_ts_monotonic.shape != eff_ts_hardware.shape:
+        raise ValueError(
+            f"形状不一致: monotonic {eff_ts_monotonic.shape} vs hardware {eff_ts_hardware.shape}"
+        )
+    N = len(eff_ts_monotonic)
+    if N < 2:
+        raise ValueError(f"至少需要 2 帧做线性回归，N={N}")
+    slope, intercept = np.polyfit(eff_ts_hardware, eff_ts_monotonic, deg=1)
+    projected = slope * eff_ts_hardware + intercept
+    return projected
+
 # ---------------------------------------------------------------------------
 # 核心对齐函数
 # ---------------------------------------------------------------------------
@@ -307,6 +338,10 @@ def align_by_image_timestamp(
         gripper_pos = f["observations/effector/position"][...]       # (N, 1)
         gripper_norm = f["observations/effector/position_norm"][...] # (N, 1)
 
+        # Phase D Sub2: 读取 effector hw_timestamp（若存在）
+        eff_hw_ts_key = "observations/effector/hw_timestamp"
+        eff_hw_ts_raw = f[eff_hw_ts_key][...] if eff_hw_ts_key in f else None
+
         act_ts = f["action/timestamp"][...]
         act_delta_ee = f["action/delta_ee_pose"][...]  # (N, 6)
         act_gripper_cmd = f["action/gripper_cmd"][...]  # (N, 1)
@@ -334,14 +369,44 @@ def align_by_image_timestamp(
     if len(anchor_ts_use) == 0:
         raise ValueError("锚时间轴在 on_stale='drop' 后为空（所有帧都是 stale）")
 
+    # Phase D Sub2: effector hw_timestamp 精确对齐分支
+    # 有效 hw_ts 时用线性回归消除 polymetis 读取时延相位误差；否则退回旧 eff_ts 路径
+    eff_ts_for_interp = eff_ts   # 默认旧路径
+    if eff_hw_ts_raw is not None:
+        if eff_hw_ts_raw.shape == eff_ts.shape and np.all(np.isfinite(eff_hw_ts_raw)):
+            try:
+                eff_ts_for_interp = _project_hw_to_monotonic(eff_ts, eff_hw_ts_raw)
+                # 线性度评估（参考 Phase D Task 8 cam hw_ts R² > 0.9999 判据）
+                ss_res = np.sum((eff_ts - eff_ts_for_interp) ** 2)
+                ss_tot = np.sum((eff_ts - eff_ts.mean()) ** 2)
+                r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+                log.info(
+                    f"[align] effector 用 hw_timestamp 精确对齐 (R²={r2:.5f})"
+                )
+            except Exception as e:
+                log.warning(
+                    f"[align] _project_hw_to_monotonic 失败 ({e})，退回 effector_ts"
+                )
+                eff_ts_for_interp = eff_ts
+        else:
+            log.warning(
+                "[align] effector hw_timestamp 含 NaN 或形状不匹配，退回 effector_ts；"
+                "如需精确同步请确认 polymetis ENABLE_GRIPPER_HW_TIMESTAMP=ON 录新数据"
+            )
+    else:
+        log.info(
+            "[align] hdf5 无 effector hw_timestamp 字段（旧数据或 polymetis 未 rebuild）；"
+            "建议 rebuild polymetis (ENABLE_GRIPPER_HW_TIMESTAMP=ON) 重录以启用精确对齐"
+        )
+
     # --- 规范化各模态源时间轴（去除重复时间戳，保留最后一个样本） ---
     # schema v2 stale 补帧可能产生重复时间戳，scipy Slerp 要求严格递增
     arm_ts_u, arm_joints_u = _dedup_strictly_increasing(arm_ts, arm_joints)
     arm_ts_u2, arm_joint_vel_u = _dedup_strictly_increasing(arm_ts, arm_joint_vel)
     arm_ts_u3, arm_pose_u = _dedup_strictly_increasing(arm_ts, arm_pose)
 
-    eff_ts_u, gripper_pos_u = _dedup_strictly_increasing(eff_ts, gripper_pos)
-    eff_ts_u2, gripper_norm_u = _dedup_strictly_increasing(eff_ts, gripper_norm)
+    eff_ts_u, gripper_pos_u = _dedup_strictly_increasing(eff_ts_for_interp, gripper_pos)
+    eff_ts_u2, gripper_norm_u = _dedup_strictly_increasing(eff_ts_for_interp, gripper_norm)
 
     act_ts_u, act_delta_ee_u = _dedup_strictly_increasing(act_ts, act_delta_ee)
     act_ts_u2, act_gripper_cmd_u = _dedup_strictly_increasing(act_ts, act_gripper_cmd)
