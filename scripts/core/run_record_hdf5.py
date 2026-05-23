@@ -356,27 +356,43 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
         - state_hifreq_block: dict（joints/joint_vel/pose/timestamp/poly_ts/wrench）
                或 None（hifreq_rate=0 时）。写盘前传给 write_episode。
     """
-    # --- 构造 3 个 SensorThread + AcquisitionHub ---
+    # --- 构造 SensorThread + AcquisitionHub ---
     # 共享 stop_event，hub.stop() 时一次性停所有线程
     stop_event = threading.Event()
 
     # zerorpc_lock：保护所有 zerorpc client 访问（robot._robot 非线程安全）
-    # robot_state 后台线程读状态 + 主线程 send_action 均持此锁，全程串行互斥
+    # 主线程 send_action 与 robot_state inline read 持锁互斥（真机路径）；
+    # FakeRobot 测试路径（robot._robot 为 None）下 SensorThread 也持此锁。
     zerorpc_lock = threading.Lock()
 
-    # robot_state 线程：串行调 zerorpc（真机）或 get_observation()（测试回退）
-    # 包含 arm（关节/速度/EE位姿）与 effector（夹爪）两模态数据
+    # zerorpc 真机 gating（lesson 2026-05-23-zerorpc-gevent-thread-affinity）：
+    # zerorpc Client 基于 gevent，Hub 是 thread-local 绑 OS 线程；后台 SensorThread/
+    # HistoryCollectorThread 调 robot._robot.* 会触发 gevent Waiter.switch 跨线程断言。
+    # 真机路径下 robot_state 走主线程 inline read、state_hifreq 强制关；
+    # FakeRobot 测试路径（无 _robot）保留原 SensorThread + HistoryCollector 行为。
+    zerorpc_isolated = getattr(robot, "_robot", None) is not None
+    if zerorpc_isolated and hifreq_rate > 0:
+        log.warning(
+            "[REC] 真机 zerorpc 检测到，state_hifreq %dHz 暂关"
+            "（gevent thread-affinity 限制，Phase D Task 7 修通后启用）",
+            int(hifreq_rate),
+        )
+        hifreq_rate = 0.0
+
+    # robot_state read_fn：真机/测试都需要（真机主循环 inline 调；测试 SensorThread 调）
     robot_state_fn = _make_robot_state_read_fn(robot, zerorpc_lock=zerorpc_lock)
-    sensors = {
-        "robot_state": SensorThread(
+
+    sensors: dict[str, SensorThread] = {}
+    if not zerorpc_isolated:
+        # 测试路径：保留 robot_state SensorThread（FakeRobot 不走 zerorpc）
+        sensors["robot_state"] = SensorThread(
             name="robot_state",
             read_fn=robot_state_fn,
             target_rate=fps,
             stop_event=stop_event,
-        ),
-    }
+        )
 
-    # 各路相机线程：仅在 robot.cameras 中有 read() 方法时建立
+    # 各路相机线程：cameras 不走 zerorpc（librealsense direct），两路径都建
     for cn in cam_names:
         cam = robot.cameras.get(cn)
         if cam is not None and hasattr(cam, "read"):
@@ -389,8 +405,7 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
 
     hub = AcquisitionHub(sensors)
 
-    # state_hifreq 累积采集线程（Task 7-A：hifreq_rate>0 时启动）
-    # 与 robot_state 线程共享 zerorpc_lock，持锁串行读 zerorpc，不并发。
+    # state_hifreq 累积采集线程：仅测试路径启用（真机上面已强制关 hifreq_rate）
     hifreq_collector = None
     if hifreq_rate > 0:
         hifreq_fn = _make_state_hifreq_read_fn(robot, zerorpc_lock)
@@ -443,6 +458,8 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
             snap = hub.snapshot(now)
 
             # --- 解包 robot_state 模态（arm/effector 共用同一线程时刻）---
+            # 真机：主线程 inline read（zerorpc gevent thread-affinity 限制）
+            # 测试：走 hub.snapshot 拿 SensorThread 数据
             rs_default = (
                 {
                     "joints": np.zeros(7, np.float64),
@@ -453,7 +470,17 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                 now,
                 True,
             )
-            rs_data, rs_ts, rs_stale = snap.get("robot_state", rs_default)
+            if zerorpc_isolated:
+                try:
+                    rs_data = robot_state_fn()    # robot_state_fn 内部持 zerorpc_lock
+                    rs_ts = time.monotonic()
+                    rs_stale = False
+                except Exception as exc:
+                    # 与 SensorThread 一致的容错：read 失败时占位+stale=True，不挂主循环
+                    log.warning("[REC] inline robot_state read 异常（占位重试）：%s", exc)
+                    rs_data, rs_ts, rs_stale = rs_default
+            else:
+                rs_data, rs_ts, rs_stale = snap.get("robot_state", rs_default)
             joints = np.asarray(rs_data["joints"], np.float64)
             joint_vel = np.asarray(rs_data["joint_vel"], np.float64)
             ee_pose = np.asarray(rs_data["ee_pose"], np.float64)
