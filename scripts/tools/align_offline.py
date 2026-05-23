@@ -397,22 +397,27 @@ def align_by_image_timestamp(
                     f"polymetis 时戳来源异常"
                 )
             else:
-                # Gate 4: 线性度（R² ≥ 0.99）— 核心 gate，投影后评估再决定是否采用
+                # Gate 4: 残差 stddev（wall-clock 域） < 50ms — 真实精度判据
+                # 不用 R² 因为：hw_ts 可能多帧卡死同值(事件触发)，R² 对此不敏感
+                # （894 帧 517 帧步进=0 仍能拿到 R²=0.99，但残差 850ms）
+                # 残差 stddev 才反映 align 后真实物理时刻偏差。
                 try:
                     projected = _project_hw_to_monotonic(eff_ts, eff_hw_ts_raw)
-                    ss_res = float(np.sum((eff_ts - projected) ** 2))
-                    ss_tot = float(np.sum((eff_ts - eff_ts.mean()) ** 2))
-                    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-                    if r2 >= 0.99:
+                    residual = eff_ts - projected
+                    res_stddev_ms = float(np.sqrt(np.mean(residual ** 2)) * 1000)
+                    res_max_ms = float(np.max(np.abs(residual)) * 1000)
+                    if res_stddev_ms <= 50.0:
                         eff_ts_for_interp = projected
                         log.info(
-                            f"[align] effector 用 hw_timestamp 精确对齐 (R²={r2:.5f})"
+                            f"[align] effector 用 hw_timestamp 精确对齐 "
+                            f"(残差 stddev={res_stddev_ms:.2f}ms, max={res_max_ms:.2f}ms)"
                         )
                     else:
                         log.warning(
-                            f"[align] effector hw_timestamp 线性度不足"
-                            f"(R²={r2:.5f} < 0.99)，退回 effector_ts；"
-                            f"polymetis 时戳与 monotonic 不强线性"
+                            f"[align] effector hw_timestamp 残差过大"
+                            f"(stddev={res_stddev_ms:.2f}ms > 50ms, max={res_max_ms:.2f}ms)，"
+                            f"退回 effector_ts；可能 hw_ts 多帧卡死同值"
+                            f"（事件触发，与 wall-clock 不强线性）"
                         )
                 except Exception as e:
                     log.warning(
