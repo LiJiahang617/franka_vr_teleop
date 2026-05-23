@@ -30,6 +30,8 @@ _state_spec = importlib.util.spec_from_file_location(
 _state_mod = importlib.util.module_from_spec(_state_spec)
 _state_spec.loader.exec_module(_state_mod)
 StateMachine = _state_mod.StateMachine
+UIState = _state_mod.UIState
+IllegalTransition = _state_mod.IllegalTransition
 
 # 动态加载 EpisodeDecider（与 UI 包分离，避免循环依赖）
 _SCRIPTS_DIR = os.path.dirname(_UI_DIR)
@@ -334,12 +336,18 @@ class RecorderController:
 
         attach_record_args 须在 start() 前调用。
         线程为 daemon，进程退出时自动清理。
+        状态机：INITIALIZING → WAITING（就绪等用户点开始）。
         """
         self._should_stop = False
         self._recorder_thread = threading.Thread(
             target=self._record_main, daemon=True, name="recorder-main"
         )
         self._recorder_thread.start()
+        # 切到 WAITING 让 UI 看到「就绪」
+        try:
+            self._sm.transition(UIState.WAITING)
+        except IllegalTransition as e:
+            log.warning(f"[RecorderController] start() 状态切换失败: {e}")
 
     def wait_until_done(self, timeout: float = 5.0) -> None:
         """等待后台线程退出（join with timeout，无僵尸线程）。
@@ -409,6 +417,15 @@ class RecorderController:
             log.error("[RecorderController] attach_record_args 未调用，无法 start")
             return
 
+        # 状态机 WAITING → RECORDING
+        try:
+            self._sm.transition(UIState.RECORDING)
+        except IllegalTransition as e:
+            log.warning(f"[RecorderController] _handle_start_cmd 切 RECORDING 失败: {e}")
+
+        # 录制前完全停 preview sampler 并等其退出，让 cam pipeline 释放
+        self.stop_preview_sampler(timeout=2.0)
+
         args = self._record_args
         run_fn = args["run_episodes_fn"]
 
@@ -472,6 +489,24 @@ class RecorderController:
             )
         except Exception as exc:
             log.exception(f"[RecorderController] run_episodes_fn 异常: {exc}")
+        finally:
+            # 录制结束后重启 preview sampler（standby 时 UI 仍能看预览）
+            args = self._record_args
+            if args is not None:
+                robot = args.get("robot")
+                if robot is not None and hasattr(robot, "cameras"):
+                    self.start_preview_sampler(robot.cameras)
+            # 状态机回 WAITING（run_fn 完成或异常都要回，等下一次 start）
+            # 路径：RECORDING → CONFIRMING → WAITING (legal _LEGAL 表)
+            try:
+                cur = self._sm.state
+                if cur == UIState.RECORDING:
+                    self._sm.transition(UIState.CONFIRMING)
+                    self._sm.transition(UIState.WAITING)
+                elif cur == UIState.CONFIRMING:
+                    self._sm.transition(UIState.WAITING)
+            except IllegalTransition as e:
+                log.warning(f"[RecorderController] _handle_start_cmd finally 状态回退失败: {e}")
 
     def _handle_home_cmd(self) -> None:
         """处理 'home' 命令：串行调用 reset_fn（守坑 7，不在 UI 线程直调 zerorpc）。"""

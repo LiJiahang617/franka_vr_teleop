@@ -73,30 +73,46 @@
     .badge-saving                       { background: #00d4ff; color: #0f1d34; }
     .badge-ready                        { background: #4ade80; color: #0f1d34; }
 
-    /* ===== 双相机预览区 ===== */
+    /* ===== 相机/传感器预览区（4 列网格：wrist / exterior / depth占位 / tactile占位）===== */
     .cam-row {
-      display: flex;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
       gap: 16px;
     }
     .cam-panel {
-      flex: 1;
+      min-width: 0;  /* 让 grid 容器内 img 能等比缩放 */
     }
     .cam-title {
-      font-size: 0.8rem;
+      font-size: 0.85rem;
       color: #94a3b8;
       margin-bottom: 6px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
-    .cam-panel img {
+    .cam-panel img,
+    .cam-panel .cam-placeholder {
       width: 100%;
       max-width: 100%;
-      height: 220px;
+      height: 360px;             /* 220→360：图像更大 */
       object-fit: contain;
       background: #0a1525;
       border-radius: 8px;
       border: 1px solid rgba(255, 255, 255, 0.08);
       display: block;
+    }
+    .cam-panel .cam-placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #475569;
+      font-size: 0.8rem;
+      text-align: center;
+      padding: 12px;
+      border-style: dashed;
+    }
+    /* 屏幕窄时 4 列堆成 2x2 */
+    @media (max-width: 1200px) {
+      .cam-row { grid-template-columns: repeat(2, 1fr); }
     }
 
     /* ===== 下部三列 Grid ===== */
@@ -243,17 +259,25 @@
     </div>
   </div>
 
-  <!-- 双相机预览 -->
+  <!-- 多模态传感预览（4 列：RGB×2 + Depth + Tactile） -->
   <div class="glass-card">
-    <div class="card-title">相机预览</div>
+    <div class="card-title">传感预览</div>
     <div class="cam-row">
       <div class="cam-panel">
-        <div class="cam-title">Wrist 腕部相机</div>
+        <div class="cam-title">Wrist 腕部 RGB</div>
         <img id="cam-wrist_image" alt="wrist camera">
       </div>
       <div class="cam-panel">
-        <div class="cam-title">Exterior 外部相机</div>
+        <div class="cam-title">Exterior 外部 RGB</div>
         <img id="cam-exterior_image" alt="exterior camera">
+      </div>
+      <div class="cam-panel">
+        <div class="cam-title">Depth 深度（预留）</div>
+        <div class="cam-placeholder" id="cam-depth">深度通道待接入<br>(Phase D depth.enabled)</div>
+      </div>
+      <div class="cam-panel">
+        <div class="cam-title">Tactile 视触觉（预留）</div>
+        <div class="cam-placeholder" id="cam-tactile">视触觉通道待接入<br>(GelSight / DIGIT)</div>
       </div>
     </div>
   </div>
