@@ -772,6 +772,20 @@ def main():
     from core import preflight as pf
     from tools.hdf5_lerobot_map import _decode as _hdf5_decode  # 接线错=模块级 bug，fail-loud
 
+    # 0. 控制器预检：幂等启动 cartesian impedance controller，避免主循环 send_action 时
+    # 报 "no controller running"（_run_polymetis_rw.sh 后台异步启动偶发失败的兜底）
+    log.info("[PREFLIGHT] 启动/确认 cartesian impedance controller...")
+    _arm_client = getattr(robot, "_robot", None)
+    if _arm_client is None:
+        _preflight_abort(
+            robot, teleop,
+            "无法获取 arm zerorpc client(robot._robot 缺失)→检查 robot 连接/wrapper",
+        )
+    controller_verdict = pf.run_controller_preflight(client=_arm_client)
+    if not controller_verdict.ok:
+        _preflight_abort(robot, teleop, f"控制器预检失败: {controller_verdict.reason}")
+    log.info(f"[PREFLIGHT] {controller_verdict.reason}")
+
     # 1. 夹爪预检（仅当 use_gripper=True；zerorpc client 由 robot._robot 获取，预检在循环外一次性完成）
     if getattr(record_cfg, "use_gripper", True):
         log.info("[PREFLIGHT] 运行夹爪预检（进程存活/连接就绪/width 真变）…")

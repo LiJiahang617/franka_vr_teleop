@@ -15,6 +15,7 @@
   - width 真变：`gripper_goto` 后轮询 `is_moving` → False 或超时（settle），再量
     多目标 `span = max - min > 0.02`（**禁** 0.5s 采样 + 相邻差 > 0.01 假阴性判据）。
 """
+import os
 import subprocess
 import time
 from collections import namedtuple
@@ -335,3 +336,120 @@ def default_log_probe(log_path: str, marker: str = "Connected.") -> bool:
             return marker in f.read()
     except OSError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# controller preflight（录制前幂等启动 cartesian impedance controller）
+# ---------------------------------------------------------------------------
+
+def run_controller_preflight(
+    client,
+    Kx=None,
+    Kxd=None,
+    *,
+    settle_timeout: float = 8.0,
+    poll: float = 0.1,
+    polymetis_python: str = "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python",
+    polymetis_conda_prefix: str = "/home/ubuntu/Desktop/jhli/envs/polymetis-local",
+) -> Verdict:
+    """录制前幂等启动 cartesian impedance controller。
+
+    实现：用 subprocess 调 polymetis-local Python 直接 import RobotInterface 启动
+    (与 scripts/services/_run_polymetis_rw.sh:88-104 同款路径)，绕开 zerorpc
+    server.robot_start_cartesian_impedance_control 未经使用/有 bug 的代码路径。
+
+    背景：_run_polymetis_rw.sh 后台异步启 controller 偶发性失败；主循环
+    send_action 调 update_desired_ee_pose 时若 controller 未跑会抛
+    grpc.RpcError "no controller running"。本函数是兜底防御。
+
+    Args:
+        client: zerorpc FrankaInterfaceClient(即 robot._robot)，用于 get_ee_pose 验证
+        Kx: 笛卡尔刚度(list of 6 floats)，默认 [100,100,100,40,40,40]
+        Kxd: 笛卡尔阻尼(list of 6 floats)，默认 [1,1,1,0.2,0.2,0.2]
+        settle_timeout: 启动后等待 controller register 的最长时间(秒)
+        poll: 轮询间隔(秒)
+        polymetis_python: polymetis-local venv python 绝对路径
+        polymetis_conda_prefix: polymetis-local CONDA_PREFIX 环境变量值
+
+    Returns:
+        Verdict(ok=True) 控制器就绪；Verdict(ok=False, reason=...) 失败有可行动指引。
+    """
+    if Kx is None:
+        Kx = [100.0, 100.0, 100.0, 40.0, 40.0, 40.0]
+    if Kxd is None:
+        Kxd = [1.0, 1.0, 1.0, 0.2, 0.2, 0.2]
+
+    # subprocess 调 polymetis-local Python(与 _run_polymetis_rw.sh 同款路径)
+    # 先 terminate_current_policy 干掉 Franka.connect 启动的 joint impedance（若有），
+    # 否则 start_cartesian 会与现有 policy 冲突卡死
+    code = (
+        "import torch\n"
+        "from polymetis import RobotInterface\n"
+        "r = RobotInterface(ip_address='localhost', enforce_version=False)\n"
+        "try:\n"
+        "    r.terminate_current_policy()\n"
+        "except Exception:\n"
+        "    pass\n"   # 无 policy 时 terminate 会抛，忽略
+        f"r.start_cartesian_impedance(Kx=torch.Tensor({Kx}), Kxd=torch.Tensor({Kxd}))\n"
+    )
+    env = os.environ.copy()
+    env["CONDA_PREFIX"] = polymetis_conda_prefix
+    try:
+        result = subprocess.run(
+            [polymetis_python, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return Verdict(
+            ok=False,
+            reason=(
+                "启动 cartesian impedance controller 超时 15s；"
+                "检查 polymetis 服务(端口 50051 / launch_robot.py)是否健康"
+            ),
+        )
+    except FileNotFoundError as e:
+        return Verdict(
+            ok=False,
+            reason=(
+                f"polymetis-local Python 不存在: {polymetis_python}({e})；"
+                f"检查 venv 路径或传入 polymetis_python 参数"
+            ),
+        )
+    if result.returncode != 0:
+        stderr_tail = result.stderr[-400:] if result.stderr else "(no stderr)"
+        return Verdict(
+            ok=False,
+            reason=(
+                f"启动 cartesian impedance controller 失败(rc={result.returncode}): "
+                f"{stderr_tail}；检查 polymetis 服务是否健康"
+            ),
+        )
+
+    # 等 controller register(用 get_ee_pose 探测——controller 跑了才能拿到稳定 pose)
+    # 接受 list / tuple / ndarray 三种类型(Franka.connect 后 zerorpc 可能返 ndarray)
+    t0 = time.monotonic()
+    last_ee = None
+    last_exc = None
+    while time.monotonic() - t0 < settle_timeout:
+        try:
+            ee = client.robot_get_ee_pose()
+            last_ee = ee
+            if hasattr(ee, "__len__") and len(ee) == 6:
+                return Verdict(ok=True, reason="cartesian impedance controller 就绪")
+        except Exception as e:
+            last_exc = e
+        if poll > 0:
+            time.sleep(poll)
+
+    return Verdict(
+        ok=False,
+        reason=(
+            f"controller 启动后 {settle_timeout}s 内 robot_get_ee_pose 未返回有效 6D 位姿；"
+            f"最后一次返回: {last_ee!r} (type={type(last_ee).__name__}); "
+            f"最后异常: {last_exc!r}; "
+            f"check polymetis launch_robot.py 日志"
+        ),
+    )
