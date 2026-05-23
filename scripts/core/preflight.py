@@ -344,50 +344,55 @@ def default_log_probe(log_path: str, marker: str = "Connected.") -> bool:
 
 def run_controller_preflight(
     client,
-    Kx=None,
-    Kxd=None,
+    Kq=None,
+    Kqd=None,
     *,
     settle_timeout: float = 8.0,
     poll: float = 0.1,
     polymetis_python: str = "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python",
     polymetis_conda_prefix: str = "/home/ubuntu/Desktop/jhli/envs/polymetis-local",
-    starter=None,  # Callable[[list, list], None]，None → 默认 subprocess 启动；测试可注入 mock
+    starter=None,  # Callable[[Kq, Kqd], None]，None → 默认 subprocess 启动；测试可注入 mock
 ) -> Verdict:
-    """录制前幂等启动 cartesian impedance controller。
+    """录制前幂等启动 joint impedance controller。
 
-    实现：用 subprocess 调 polymetis-local Python 直接 import RobotInterface 启动
-    (与 scripts/services/_run_polymetis_rw.sh:88-104 同款路径)，绕开 zerorpc
-    server.robot_start_cartesian_impedance_control 未经使用/有 bug 的代码路径。
+    实现：用 subprocess 调 polymetis-local Python 直接 import RobotInterface 启动。
 
-    背景：_run_polymetis_rw.sh 后台异步启 controller 偶发性失败；主循环
-    send_action 调 update_desired_ee_pose 时若 controller 未跑会抛
+    关键背景：Franka.connect() 启动的是 joint impedance（_check_franka_connection
+    line 86 调 robot_start_joint_impedance_control）；这个 polymetis fork 的
+    update_desired_ee_pose 内部 IK 后走 update_desired_joint_positions 路径
+    （robot_interface.py:710），最终接 joint impedance controller。所以本 preflight
+    必须启动 joint impedance（而非 cartesian），否则会破坏正确路径。
+
+    背景：_run_polymetis_rw.sh 启动后 controller 可能因 com violation / 状态切换
+    等原因 terminate；主循环 send_action 时若 joint impedance 未跑会抛
     grpc.RpcError "no controller running"。本函数是兜底防御。
 
     Args:
         client: zerorpc FrankaInterfaceClient(即 robot._robot)，用于 get_ee_pose 验证
-        Kx: 笛卡尔刚度(list of 6 floats)，默认 [100,100,100,40,40,40]
-        Kxd: 笛卡尔阻尼(list of 6 floats)，默认 [1,1,1,0.2,0.2,0.2]
+        Kq: 关节刚度(list of 7 floats)，None → polymetis 内部默认
+        Kqd: 关节阻尼(list of 7 floats)，None → polymetis 内部默认
         settle_timeout: 启动后等待 controller register 的最长时间(秒)
         poll: 轮询间隔(秒)
         polymetis_python: polymetis-local venv python 绝对路径
         polymetis_conda_prefix: polymetis-local CONDA_PREFIX 环境变量值
-        starter: Callable[[list, list], None]，接受 (Kx, Kxd) 参数；
+        starter: Callable[[Kq, Kqd], None]，接受 (Kq, Kqd) 参数；
                  None → 默认 subprocess 启动；测试可注入 mock 函数避免真 subprocess
 
     Returns:
         Verdict(ok=True) 控制器就绪；Verdict(ok=False, reason=...) 失败有可行动指引。
     """
-    if Kx is None:
-        Kx = [100.0, 100.0, 100.0, 40.0, 40.0, 40.0]
-    if Kxd is None:
-        Kxd = [1.0, 1.0, 1.0, 0.2, 0.2, 0.2]
-
     if starter is None:
-        # subprocess 调 polymetis-local Python(与 _run_polymetis_rw.sh 同款路径)
-        # 先 terminate_current_policy 干掉 Franka.connect 启动的 joint impedance（若有），
-        # 否则 start_cartesian 会与现有 policy 冲突卡死
-        def starter(Kx_arg, Kxd_arg):
-            """默认 starter：subprocess 调 polymetis-local Python 启动 controller。"""
+        # subprocess 调 polymetis-local Python 启动 joint impedance
+        # 先 terminate_current_policy 干掉任何残留 policy（cartesian/旧 joint），
+        # 再 start_joint_impedance（与 Franka.connect 一致，update_desired_ee_pose 接此）
+        def starter(Kq_arg, Kqd_arg):
+            """默认 starter：subprocess 调 polymetis-local Python 启动 joint impedance。"""
+            if Kq_arg is None and Kqd_arg is None:
+                start_call = "r.start_joint_impedance()"
+            else:
+                kq_str = f"torch.Tensor({Kq_arg})" if Kq_arg is not None else "None"
+                kqd_str = f"torch.Tensor({Kqd_arg})" if Kqd_arg is not None else "None"
+                start_call = f"r.start_joint_impedance(Kq={kq_str}, Kqd={kqd_str})"
             code = (
                 "import torch\n"
                 "from polymetis import RobotInterface\n"
@@ -396,7 +401,7 @@ def run_controller_preflight(
                 "    r.terminate_current_policy()\n"
                 "except Exception:\n"
                 "    pass\n"   # 无 policy 时 terminate 会抛，忽略
-                f"r.start_cartesian_impedance(Kx=torch.Tensor({Kx_arg}), Kxd=torch.Tensor({Kxd_arg}))\n"
+                f"{start_call}\n"
             )
             env = os.environ.copy()
             env["CONDA_PREFIX"] = polymetis_conda_prefix
@@ -409,18 +414,18 @@ def run_controller_preflight(
             )
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"start_cartesian_impedance subprocess failed (rc={result.returncode}): "
+                    f"start_joint_impedance subprocess failed (rc={result.returncode}): "
                     f"{result.stderr[-400:]}"
                 )
 
-    # 启动 controller（幂等：starter 内部处理 terminate + start_cartesian）
+    # 启动 controller（幂等：starter 内部 terminate 残留 + start_joint_impedance）
     try:
-        starter(Kx, Kxd)
+        starter(Kq, Kqd)
     except subprocess.TimeoutExpired:
         return Verdict(
             ok=False,
             reason=(
-                "启动 cartesian impedance controller 超时 15s；"
+                "启动 joint impedance controller 超时 15s；"
                 "检查 polymetis 服务(端口 50051 / launch_robot.py)是否健康"
             ),
         )
@@ -436,7 +441,7 @@ def run_controller_preflight(
         return Verdict(
             ok=False,
             reason=(
-                f"启动 cartesian impedance controller 失败: {e}；"
+                f"启动 joint impedance controller 失败: {e}；"
                 f"检查 polymetis 服务是否健康"
             ),
         )
@@ -451,7 +456,7 @@ def run_controller_preflight(
             ee = client.robot_get_ee_pose()
             last_ee = ee
             if hasattr(ee, "__len__") and len(ee) == 6:
-                return Verdict(ok=True, reason="cartesian impedance controller 就绪")
+                return Verdict(ok=True, reason="joint impedance controller 就绪")
         except Exception as e:
             last_exc = e
         if poll > 0:

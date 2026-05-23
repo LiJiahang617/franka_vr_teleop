@@ -33,12 +33,12 @@ class _FakeClientEEPoseInvalid:
 
 def test_controller_preflight_ok_with_injected_starter():
     """starter 注入成功 + ee_pose valid → Verdict.ok=True，不触发真 subprocess。"""
-    called = {"count": 0, "Kx": None, "Kxd": None}
+    called = {"count": 0, "Kq": "sentinel", "Kqd": "sentinel"}
 
-    def starter(Kx, Kxd):
+    def starter(Kq, Kqd):
         called["count"] += 1
-        called["Kx"] = Kx
-        called["Kxd"] = Kxd
+        called["Kq"] = Kq
+        called["Kqd"] = Kqd
 
     res = pf.run_controller_preflight(
         client=_FakeClientOK(), settle_timeout=1.0, poll=0.01, starter=starter,
@@ -46,13 +46,14 @@ def test_controller_preflight_ok_with_injected_starter():
     assert res.ok is True
     assert "就绪" in res.reason or "ready" in res.reason.lower()
     assert called["count"] == 1
-    assert called["Kx"] == [100.0, 100.0, 100.0, 40.0, 40.0, 40.0]
-    assert called["Kxd"] == [1.0, 1.0, 1.0, 0.2, 0.2, 0.2]
+    # 默认 Kq/Kqd 是 None（让 polymetis 内部默认）
+    assert called["Kq"] is None
+    assert called["Kqd"] is None
 
 
 def test_controller_preflight_fails_when_starter_raises():
     """starter 抛 Exception → Verdict.ok=False + reason 含失败信息，不触发真 subprocess。"""
-    def starter(Kx, Kxd):
+    def starter(Kq, Kqd):
         raise RuntimeError("simulated polymetis unreachable")
 
     res = pf.run_controller_preflight(
@@ -64,7 +65,7 @@ def test_controller_preflight_fails_when_starter_raises():
 
 def test_controller_preflight_fails_when_ee_pose_never_valid():
     """starter OK 但 ee_pose 始终错形 → settle 超时 → Verdict.ok=False。"""
-    def starter(Kx, Kxd):
+    def starter(Kq, Kqd):
         pass  # 不做任何事，ee_pose 端不会变 valid
 
     res = pf.run_controller_preflight(
@@ -74,21 +75,21 @@ def test_controller_preflight_fails_when_ee_pose_never_valid():
     assert "未返回有效" in res.reason or "register" in res.reason.lower()
 
 
-def test_controller_preflight_uses_custom_Kx_Kxd():
-    """传 Kx/Kxd 参数应透传到 starter。"""
+def test_controller_preflight_uses_custom_Kq_Kqd():
+    """传 Kq/Kqd 参数应透传到 starter。"""
     received = {}
 
-    def starter(Kx, Kxd):
-        received["Kx"] = Kx
-        received["Kxd"] = Kxd
+    def starter(Kq, Kqd):
+        received["Kq"] = Kq
+        received["Kqd"] = Kqd
 
     pf.run_controller_preflight(
         client=_FakeClientOK(),
-        Kx=[1, 2, 3, 4, 5, 6],
-        Kxd=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        Kq=[10, 20, 30, 40, 50, 60, 70],
+        Kqd=[1, 2, 3, 4, 5, 6, 7],
         settle_timeout=0.5,
         poll=0.01,
         starter=starter,
     )
-    assert received["Kx"] == [1, 2, 3, 4, 5, 6]
-    assert received["Kxd"] == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    assert received["Kq"] == [10, 20, 30, 40, 50, 60, 70]
+    assert received["Kqd"] == [1, 2, 3, 4, 5, 6, 7]
