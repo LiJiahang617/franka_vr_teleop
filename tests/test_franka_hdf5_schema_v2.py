@@ -641,3 +641,48 @@ def test_dtype_violation_caught(tmp_path):
         f["observations/arm"].create_dataset("pose", data=d.astype(np.float32))
     v = S.validate_episode(p)
     assert any("observations/arm/pose" in x and "float64" in x for x in v)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: effector/hw_timestamp 可选字段（libfranka 夹爪硬件时戳）
+# ---------------------------------------------------------------------------
+
+def test_validate_episode_optional_hw_timestamp_missing_is_ok(tmp_path):
+    """旧 v2 数据集（无 effector/hw_timestamp）validate 通过——字段可选。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=10)   # 复用既有 helper（不写 effector/hw_timestamp）
+    v = S.validate_episode(p)
+    assert v == [], f"无 hw_timestamp 应通过，实际违规: {v}"
+
+
+def test_validate_episode_optional_hw_timestamp_present_ok(tmp_path):
+    """含 effector/hw_timestamp 字段（shape (N,), float64）validate 通过。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=10)
+    with h5py.File(p, "a") as f:
+        f.create_dataset("observations/effector/hw_timestamp",
+                         data=np.linspace(100.0, 100.3, 10, dtype=np.float64))
+    v = S.validate_episode(p)
+    assert v == [], f"有合规 hw_timestamp 应通过，实际违规: {v}"
+
+
+def test_validate_episode_hw_timestamp_wrong_shape_fails(tmp_path):
+    """hw_timestamp 形状错误（(N,1)）应违规——字段存在则严格校验。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=10)
+    with h5py.File(p, "a") as f:
+        f.create_dataset("observations/effector/hw_timestamp",
+                         data=np.zeros((10, 1), dtype=np.float64))   # 错形状
+    v = S.validate_episode(p)
+    assert any("hw_timestamp" in str(x).lower() for x in v), f"应违规 hw_timestamp，实际: {v}"
+
+
+def test_validate_episode_hw_timestamp_wrong_dtype_fails(tmp_path):
+    """hw_timestamp dtype 错误（float32）应违规。"""
+    p = str(tmp_path / "ep.h5")
+    _write_v2(p, N=10)
+    with h5py.File(p, "a") as f:
+        f.create_dataset("observations/effector/hw_timestamp",
+                         data=np.zeros(10, dtype=np.float32))   # 错 dtype
+    v = S.validate_episode(p)
+    assert any("hw_timestamp" in str(x).lower() for x in v), f"应违规 hw_timestamp，实际: {v}"

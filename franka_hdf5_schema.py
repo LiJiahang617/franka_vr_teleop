@@ -22,6 +22,18 @@ EE_DIM = 6              # [x, y, z, rx, ry, rz]
 GRIPPER_MAX_M = 0.08
 
 
+# v2 内**可选**字段（不 bump 版本号）：字段缺失视为合规；字段存在则严格校验
+# observations/effector/hw_timestamp：libfranka 硬件 push 时戳（since robot start，秒）
+# 由 polymetis franka_hand_client 在 ENABLE_GRIPPER_HW_TIMESTAMP=ON 时填入；
+# 旧 polymetis（或 cmake 关闭该宏）录制的数据集不含该字段，validate 仍 PASS。
+OPTIONAL_FIELDS_V2 = {
+    "observations/effector/hw_timestamp": {
+        "shape": ("N",),
+        "dtype": np.float64,
+    },
+}
+
+
 def _str_val(d):
     """将 HDF5 scalar/bytes dataset 读出为 str。
 
@@ -254,5 +266,21 @@ def validate_episode(path):
             v.append("infos/calibration/oc2base_R 缺失或 shape != (3,3)")
         elif cr.dtype != np.float64:
             v.append(f"infos/calibration/oc2base_R dtype {cr.dtype} != float64")
+
+        # 可选字段：存在则严格校验 shape/dtype；不存在跳过
+        for path, spec in OPTIONAL_FIELDS_V2.items():
+            if path in f:
+                ds = f[path]
+                exp_shape = spec["shape"]
+                # 解析 ("N",) 形状语义（N=帧数）
+                if exp_shape == ("N",):
+                    if ds.ndim != 1 or ds.shape[0] != N:
+                        v.append(
+                            f"{path}: 形状不合规，期望 ({N},) 实际 {ds.shape}"
+                        )
+                if ds.dtype != spec["dtype"]:
+                    v.append(
+                        f"{path}: dtype 不合规，期望 {spec['dtype']} 实际 {ds.dtype}"
+                    )
 
     return v
