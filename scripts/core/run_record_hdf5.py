@@ -180,14 +180,17 @@ def _make_robot_state_read_fn(robot, zerorpc_lock=None):
                 try:
                     gripper_state = zerorpc_client.gripper_get_state()
                     gripper_norm = max(0.0, min(1.0, gripper_state["width"] / robot.config.gripper_max_open))
+                    gripper_hw_ts = gripper_state.get("timestamp")   # 旧 polymetis 无此字段 → None
                 except Exception:
                     # 夹爪不可用时仅 gripper_norm 置零（不连带影响已读的 joints/ee_pose）
                     gripper_norm = 0.0
+                    gripper_hw_ts = None
             return {
                 "joints": np.array(joint_pos, dtype=np.float64),
                 "joint_vel": np.array(joint_vel, dtype=np.float64),
                 "ee_pose": np.array(ee_pose, dtype=np.float64),
                 "gripper_norm": gripper_norm,
+                "gripper_hw_ts": gripper_hw_ts,
             }
         return _read_via_zerorpc
     else:
@@ -207,6 +210,7 @@ def _make_robot_state_read_fn(robot, zerorpc_lock=None):
                 "joint_vel": joint_vel_arr,
                 "ee_pose": ee_pose,
                 "gripper_norm": gripper_norm,
+                "gripper_hw_ts": None,   # FakeRobot 路径无硬件戳
             }
         return _read_via_get_observation
 
@@ -466,6 +470,7 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                     "joint_vel": np.zeros(7, np.float64),
                     "ee_pose": np.zeros(6, np.float64),
                     "gripper_norm": 0.0,
+                    "gripper_hw_ts": None,   # inline read 异常时占位，避免 KeyError
                 },
                 now,
                 True,
@@ -533,11 +538,15 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
                 # hw_ts 有效时写真硬件戳（毫秒）；否则 fallback 软件戳（秒，与 c_ts 单位同）
                 cam_hw_ts[cn] = hw_ts_val if hw_ts_val is not None else c_ts
 
+            # Task 5：透传 zerorpc gripper 硬件时间戳（旧 polymetis 无此字段时为 None）
+            effector_hw_ts = rs_data.get("gripper_hw_ts")   # None 或 float（秒，since robot start）
+
             buf.append(dict(
                 ts=now,  # Minor1：帧时刻用 snapshot 时刻，非编码后时刻
                 # v2 各模态独立时间戳字段
                 arm_ts=arm_ts,
                 effector_ts=effector_ts,
+                effector_hw_ts=effector_hw_ts,  # Task 5：gripper 硬件戳（旧接口 None）
                 cam_ts=cam_ts,
                 cam_hw_ts=cam_hw_ts,  # Task 8-A 实填真硬件戳；普通相机 fallback 软件戳
                 # v2 stale 字段（各模态独立，多线程时可能非零）

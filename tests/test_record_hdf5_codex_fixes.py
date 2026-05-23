@@ -295,3 +295,97 @@ def test_frame_ts_is_snapshot_time_not_after_encode():
         assert ts > 0, f"帧 {i}: ts={ts} 非正数"
         # ts 不晚于 t_before_test（录制已结束，帧时刻早于测试读取时刻）
         assert ts < t_before_test, f"帧 {i}: ts={ts} 晚于测试读取时刻 {t_before_test}"
+
+
+# ─── Task 5：effector_hw_ts 透传 ───────────────────────────────────────────────
+
+def test_record_episode_passes_through_gripper_hw_timestamp(tmp_path):
+    """zerorpc gripper_get_state 返 timestamp 字段时，
+    record_episode 每帧 effector_hw_ts 应等于 client 返的 timestamp。"""
+    import threading
+
+    class TimestampedClient:
+        def __init__(self):
+            self._t = 100.0
+        def robot_get_joint_positions(self): return [0.0]*7
+        def robot_get_joint_velocities(self): return [0.0]*7
+        def robot_get_ee_pose(self): return [0.0]*6
+        def gripper_get_state(self):
+            self._t += 0.05
+            return {"width": 0.04, "timestamp": self._t}
+
+    class _FakeCam:
+        def read(self): return np.zeros((8, 8, 3), np.uint8)
+
+    class _FakeTeleop:
+        def get_action(self):
+            return {
+                "delta_ee_pose.x": 0.0, "delta_ee_pose.y": 0.0, "delta_ee_pose.z": 0.0,
+                "delta_ee_pose.rx": 0.0, "delta_ee_pose.ry": 0.0, "delta_ee_pose.rz": 0.0,
+                "gripper_cmd_bin": 0.0,
+            }
+
+    class RealLikeRobot:
+        def __init__(self):
+            self._robot = TimestampedClient()
+            self.cameras = {"wrist_image": _FakeCam()}
+            self.config = type("C", (), {"gripper_max_open": 0.08})()
+        def send_action(self, a): pass
+
+    import importlib.util, os
+    _P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    s = importlib.util.spec_from_file_location("rrh", os.path.join(_P, "scripts/core/run_record_hdf5.py"))
+    m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+
+    buf, _ = m.record_episode(
+        robot=RealLikeRobot(), teleop=_FakeTeleop(),
+        fps=30.0, max_sec=0.15, gripper_max_open=0.08,
+        cam_names=["wrist_image"], hifreq_rate=0.0,
+    )
+    assert len(buf) > 0
+    for fr in buf:
+        assert "effector_hw_ts" in fr, "缺 effector_hw_ts 字段"
+        assert fr["effector_hw_ts"] is not None
+        assert fr["effector_hw_ts"] >= 100.0
+
+
+def test_record_episode_handles_missing_gripper_timestamp(tmp_path):
+    """旧 polymetis 不返 timestamp 字段时，effector_hw_ts=None 仍能录制。"""
+
+    class LegacyClient:
+        def robot_get_joint_positions(self): return [0.0]*7
+        def robot_get_joint_velocities(self): return [0.0]*7
+        def robot_get_ee_pose(self): return [0.0]*6
+        def gripper_get_state(self): return {"width": 0.04}
+
+    class _FakeCam:
+        def read(self): return np.zeros((8, 8, 3), np.uint8)
+
+    class _FakeTeleop:
+        def get_action(self):
+            return {
+                "delta_ee_pose.x": 0.0, "delta_ee_pose.y": 0.0, "delta_ee_pose.z": 0.0,
+                "delta_ee_pose.rx": 0.0, "delta_ee_pose.ry": 0.0, "delta_ee_pose.rz": 0.0,
+                "gripper_cmd_bin": 0.0,
+            }
+
+    class RealLikeRobot:
+        def __init__(self):
+            self._robot = LegacyClient()
+            self.cameras = {"wrist_image": _FakeCam()}
+            self.config = type("C", (), {"gripper_max_open": 0.08})()
+        def send_action(self, a): pass
+
+    import importlib.util, os
+    _P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    s = importlib.util.spec_from_file_location("rrh", os.path.join(_P, "scripts/core/run_record_hdf5.py"))
+    m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+
+    buf, _ = m.record_episode(
+        robot=RealLikeRobot(), teleop=_FakeTeleop(),
+        fps=30.0, max_sec=0.1, gripper_max_open=0.08,
+        cam_names=["wrist_image"], hifreq_rate=0.0,
+    )
+    assert len(buf) > 0
+    for fr in buf:
+        assert fr.get("effector_hw_ts") is None, "旧 polymetis 应为 None"
