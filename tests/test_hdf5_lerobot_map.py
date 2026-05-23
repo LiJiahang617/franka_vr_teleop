@@ -626,3 +626,141 @@ class TestBuildStateArrayValidation:
         }
         with pytest.raises(ValueError, match="gripper_position_norm"):
             build_state_array(aligned)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Task 7 TDD：转换器对缺 effector/hw_timestamp 字段 ep 发出 warning
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_minimal_v2_episode(path, N, with_hw_ts=False, hw_ts_all_nan=False):
+    """创建最小完整合规 franka-hdf5-v2 episode（含图像），供转换器 subprocess 测试使用。
+
+    比 test_align_offline 中同名函数多了 infos/schema_version、effector/type、
+    camera images 等字段，以通过 schema validate_episode 校验。
+
+    Args:
+        path: 输出文件路径
+        N: 帧数
+        with_hw_ts: 是否写入 observations/effector/hw_timestamp
+        hw_ts_all_nan: with_hw_ts=True 时是否将 hw_timestamp 全设为 NaN
+    """
+    import franka_hdf5_schema as _S
+
+    H, W = 64, 64  # SVT-AV1 最小分辨率 64x64
+    img = np.zeros((H, W, 3), np.uint8)
+    ok, enc = cv2.imencode(".jpg", img)
+    jb = np.frombuffer(enc.tobytes(), np.uint8)
+    ts = np.arange(N, dtype=np.float64)  # 0..N-1 严格递增
+
+    with h5py.File(str(path), "w") as f:
+        # infos
+        inf = f.create_group("infos")
+        inf.create_dataset("schema_version", data=np.bytes_(_S.SCHEMA_VERSION))
+        ti = inf.create_group("task_info")
+        ti.create_dataset("task_name", data=np.bytes_("pick"))
+        ti.create_dataset("collection_frequency", data=np.array([30.0, 30.0], np.float64))
+        ti.create_dataset("total_frames", data=np.int64(N))
+        ti.create_dataset("robot", data=np.bytes_("franka_panda"))
+        inf.create_group("camera_params")
+        cal = inf.create_group("calibration")
+        cal.create_dataset("oc2base_R", data=np.eye(3, dtype=np.float64))
+        cal.create_dataset("quality", data=np.bytes_("{}"))
+        cal.create_dataset("vr_source", data=np.bytes_("unity"))
+
+        obs = f.create_group("observations")
+
+        # arm
+        arm = obs.create_group("arm")
+        arm.create_dataset("joints", data=np.zeros((N, 7), np.float64))
+        arm.create_dataset("joint_vel", data=np.zeros((N, 7), np.float64))
+        arm.create_dataset("pose", data=np.zeros((N, 6), np.float64))
+        arm.create_dataset("timestamp", data=ts.copy())
+        arm.create_dataset("stale", data=np.zeros(N, dtype=bool))
+
+        # effector
+        eff = obs.create_group("effector")
+        eff.create_dataset("position", data=np.zeros((N, 1), np.float64))
+        eff.create_dataset("position_norm", data=np.ones((N, 1), np.float64) * 0.5)
+        eff.create_dataset("type", data=np.array([b"gripper"] * N,
+                                                  dtype=h5py.special_dtype(vlen=bytes)))
+        eff.create_dataset("timestamp", data=ts.copy())
+        eff.create_dataset("stale", data=np.zeros(N, dtype=bool))
+        if with_hw_ts:
+            hw = np.full(N, np.nan) if hw_ts_all_nan else (ts - 800.0)
+            eff.create_dataset("hw_timestamp", data=hw.astype(np.float64))
+
+        # camera/rgb/wrist（含图像）
+        cam = obs.create_group("camera")
+        rgb = cam.create_group("rgb")
+        g = rgb.create_group("wrist")
+        d = g.create_dataset("images", (N,), dtype=h5py.special_dtype(vlen=np.dtype("uint8")))
+        for i in range(N):
+            d[i] = jb
+        g.create_dataset("timestamp", data=ts.copy())
+        g.create_dataset("stale", data=np.zeros(N, dtype=bool))
+        g.create_dataset("hw_timestamp", data=ts.copy())  # camera hw_ts schema 必须字段
+
+        # state_hifreq（M=0 合规占位）
+        hf = obs.create_group("state_hifreq")
+        for k, sh in [("joints", (0, 7)), ("joint_vel", (0, 7)), ("pose", (0, 6)),
+                      ("timestamp", (0,)), ("poly_ts", (0,))]:
+            hf.create_dataset(k, data=np.zeros(sh, np.float64))
+        hf.create_dataset("wrench", data=np.zeros((0, 6), np.float64))
+
+        # action
+        act = f.create_group("action")
+        act.create_dataset("delta_ee_pose", data=np.zeros((N, 6), np.float64))
+        act.create_dataset("gripper_cmd", data=np.ones((N, 1), np.float64))
+        act.create_dataset("timestamp", data=ts.copy() + 0.001)  # 严格递增且 > obs ts
+
+    return path
+
+
+def test_converter_v30_warns_when_hw_timestamp_missing(tmp_path):
+    """v3.0 转换器遇到缺 effector/hw_timestamp 的 ep 时 log warning。"""
+    ep_dir = tmp_path / "src"
+    ep_dir.mkdir()
+    _make_minimal_v2_episode(ep_dir / "ep0.h5", N=30, with_hw_ts=False)
+
+    out = tmp_path / "out"
+    import subprocess
+    _P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    r = subprocess.run([
+        "/home/ubuntu/Desktop/jhli/envs/franka-teleop/bin/python",
+        f"{_P}/scripts/tools/hdf5_to_lerobot.py",
+        "--in", str(ep_dir),
+        "--repo-id", "local/test",
+        "--fps", "30",
+        "--root", str(out),
+        "--task", "test",
+    ], capture_output=True, text=True)
+    assert r.returncode == 0, f"转换器退出非 0: stderr={r.stderr[:500]}"
+    combined = (r.stderr + r.stdout).lower()
+    assert "hw_timestamp" in combined, f"应 warning 提示 hw_timestamp 缺失: {combined[:500]}"
+    assert "rebuild" in combined or "退回" in (r.stderr + r.stdout), \
+        f"warning 应指引 rebuild polymetis: {combined[:500]}"
+
+
+def test_converter_v21_warns_when_hw_timestamp_missing(tmp_path):
+    """v2.1 转换器同样要 warning。"""
+    ep_dir = tmp_path / "src"
+    ep_dir.mkdir()
+    _make_minimal_v2_episode(ep_dir / "ep0.h5", N=30, with_hw_ts=False)
+
+    out = tmp_path / "out"
+    import subprocess
+    _P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    r = subprocess.run([
+        "/home/ubuntu/Desktop/jhli/envs/franka-teleop/bin/python",
+        f"{_P}/scripts/tools/hdf5_to_lerobot_v21.py",
+        "--in-dir", str(ep_dir),
+        "--out", str(out),
+        "--fps", "30",
+        "--task", "test",
+        "--robot-type", "franka",
+    ], capture_output=True, text=True)
+    assert r.returncode == 0, f"转换器退出非 0: stderr={r.stderr[:500]}"
+    combined = (r.stderr + r.stdout).lower()
+    assert "hw_timestamp" in combined, f"应 warning: {combined[:500]}"
+    assert "rebuild" in combined or "退回" in (r.stderr + r.stdout), \
+        f"warning 应指引 rebuild polymetis: {combined[:500]}"

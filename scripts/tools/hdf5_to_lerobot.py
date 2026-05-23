@@ -75,6 +75,20 @@ def convert(in_dir, repo_id, fps, root, task="task"):
     }
     ds = LeRobotDataset.create(repo_id=repo_id, fps=int(fps), features=feats, root=root)
 
+    # Phase D Sub2: 检测 hw_timestamp 字段，缺失则 warning 提示精度退化
+    missing_hw_ts_eps = []
+    for _ep in eps:
+        with h5py.File(_ep, "r") as _fp:
+            if "observations/effector/hw_timestamp" not in _fp:
+                missing_hw_ts_eps.append(_ep)
+    if missing_hw_ts_eps:
+        log.warning(
+            "[converter] %d/%d episodes 缺失 effector/hw_timestamp，"
+            "align_offline 使用旧路径（精度 ±100ms）；"
+            "如需精确同步请 rebuild polymetis (ENABLE_GRIPPER_HW_TIMESTAMP=ON) 后重录",
+            len(missing_hw_ts_eps), len(eps),
+        )
+
     for ep in eps:
         v = S.validate_episode(ep)
         if v:

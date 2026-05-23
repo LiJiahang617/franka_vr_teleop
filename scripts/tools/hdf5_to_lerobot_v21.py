@@ -537,6 +537,20 @@ def convert(
     from core.schema_loader import load_franka_hdf5_schema
     _schema = load_franka_hdf5_schema()
 
+    # Phase D Sub2: 检测 hw_timestamp 字段，缺失则 warning 提示精度退化
+    missing_hw_ts_eps = []
+    for _ep in h5_files:
+        with h5py.File(_ep, "r") as _fp:
+            if "observations/effector/hw_timestamp" not in _fp:
+                missing_hw_ts_eps.append(_ep)
+    if missing_hw_ts_eps:
+        logging.warning(
+            "[converter] %d/%d episodes 缺失 effector/hw_timestamp，"
+            "align_offline 使用旧路径（精度 ±100ms）；"
+            "如需精确同步请 rebuild polymetis (ENABLE_GRIPPER_HW_TIMESTAMP=ON) 后重录",
+            len(missing_hw_ts_eps), len(h5_files),
+        )
+
     for src_idx, h5_path in enumerate(h5_files):
         # 预校验：不合规直接跳过，不分配 out 索引
         violations = _schema.validate_episode(h5_path)
