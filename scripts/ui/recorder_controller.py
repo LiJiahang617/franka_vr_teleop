@@ -223,7 +223,7 @@ class RecorderController:
 
     # ---------- Preview sampler：standby 时 UI 也能看相机 ----------
 
-    def start_preview_sampler(self, cameras: dict, fps: float = 10.0) -> None:
+    def start_preview_sampler(self, cameras: dict, fps: float = 30.0) -> None:
         """启动 preview sampler 线程：standby 时持续 read 各路 cam 填 _latest_frames。
 
         UI 设计原本只在 RECORDING 时通过 frame_observer 写 _latest_frames，
@@ -233,7 +233,8 @@ class RecorderController:
 
         Args:
             cameras: dict[cam_name, camera_obj]，cam.read() 返 ndarray 或 (ndarray, hw_ts)
-            fps: preview 采样率，默认 10Hz（够流畅，不抢真 record 30Hz）
+            fps: preview 采样率，默认 30Hz（与录制 fps 同源；若与 record 主循环冲突
+                 可降到 10Hz 或加 pause/resume 让 frame_observer 接管）
         """
         if self._preview_thread is not None:
             return  # 已启动
