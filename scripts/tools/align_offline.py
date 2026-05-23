@@ -369,30 +369,55 @@ def align_by_image_timestamp(
     if len(anchor_ts_use) == 0:
         raise ValueError("锚时间轴在 on_stale='drop' 后为空（所有帧都是 stale）")
 
-    # Phase D Sub2: effector hw_timestamp 精确对齐分支
-    # 有效 hw_ts 时用线性回归消除 polymetis 读取时延相位误差；否则退回旧 eff_ts 路径
+    # Phase D Sub2: effector hw_timestamp 精确对齐分支（含 gate 防误用坏数据）
+    # codex review HIGH #2：原逻辑 R² 只 log 不 gate，finite-but-invalid hw_ts 会静默劣化训练数据
+    # 新增 3 道 gate：唯一性 / 严格非降 / R² ≥ 0.99；任一不过 → 退回 eff_ts + WARNING
     eff_ts_for_interp = eff_ts   # 默认旧路径
     if eff_hw_ts_raw is not None:
-        if eff_hw_ts_raw.shape == eff_ts.shape and np.all(np.isfinite(eff_hw_ts_raw)):
-            try:
-                eff_ts_for_interp = _project_hw_to_monotonic(eff_ts, eff_hw_ts_raw)
-                # 线性度评估（参考 Phase D Task 8 cam hw_ts R² > 0.9999 判据）
-                ss_res = np.sum((eff_ts - eff_ts_for_interp) ** 2)
-                ss_tot = np.sum((eff_ts - eff_ts.mean()) ** 2)
-                r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-                log.info(
-                    f"[align] effector 用 hw_timestamp 精确对齐 (R²={r2:.5f})"
-                )
-            except Exception as e:
-                log.warning(
-                    f"[align] _project_hw_to_monotonic 失败 ({e})，退回 effector_ts"
-                )
-                eff_ts_for_interp = eff_ts
-        else:
+        # Gate 1: shape + finite
+        if eff_hw_ts_raw.shape != eff_ts.shape or not np.all(np.isfinite(eff_hw_ts_raw)):
             log.warning(
                 "[align] effector hw_timestamp 含 NaN 或形状不匹配，退回 effector_ts；"
                 "如需精确同步请确认 polymetis ENABLE_GRIPPER_HW_TIMESTAMP=ON 录新数据"
             )
+        else:
+            # Gate 2: 至少 2 个 unique 值（防全常数）
+            n_unique = len(np.unique(eff_hw_ts_raw))
+            if n_unique < 2:
+                log.warning(
+                    f"[align] effector hw_timestamp 退化常数（unique={n_unique}），"
+                    f"退回 effector_ts；polymetis cpp ENABLE_GRIPPER_HW_TIMESTAMP=OFF？"
+                )
+            # Gate 3: 严格非降（允许重复，禁止递减）
+            elif np.any(np.diff(eff_hw_ts_raw) < 0):
+                n_violations = int(np.sum(np.diff(eff_hw_ts_raw) < 0))
+                log.warning(
+                    f"[align] effector hw_timestamp 非单调非降"
+                    f"（{n_violations} 处递减），退回 effector_ts；"
+                    f"polymetis 时戳来源异常"
+                )
+            else:
+                # Gate 4: 线性度（R² ≥ 0.99）— 核心 gate，投影后评估再决定是否采用
+                try:
+                    projected = _project_hw_to_monotonic(eff_ts, eff_hw_ts_raw)
+                    ss_res = float(np.sum((eff_ts - projected) ** 2))
+                    ss_tot = float(np.sum((eff_ts - eff_ts.mean()) ** 2))
+                    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+                    if r2 >= 0.99:
+                        eff_ts_for_interp = projected
+                        log.info(
+                            f"[align] effector 用 hw_timestamp 精确对齐 (R²={r2:.5f})"
+                        )
+                    else:
+                        log.warning(
+                            f"[align] effector hw_timestamp 线性度不足"
+                            f"(R²={r2:.5f} < 0.99)，退回 effector_ts；"
+                            f"polymetis 时戳与 monotonic 不强线性"
+                        )
+                except Exception as e:
+                    log.warning(
+                        f"[align] _project_hw_to_monotonic 失败 ({e})，退回 effector_ts"
+                    )
     else:
         log.info(
             "[align] hdf5 无 effector hw_timestamp 字段（旧数据或 polymetis 未 rebuild）；"

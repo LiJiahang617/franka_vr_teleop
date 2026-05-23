@@ -976,3 +976,68 @@ def test_align_falls_back_when_hw_timestamp_all_nan(tmp_path, caplog):
         "nan" in rec.getMessage().lower() or "退回" in rec.getMessage()
         for rec in caplog.records
     ), f"全 NaN 应退回，实际日志: {[r.getMessage() for r in caplog.records]}"
+
+def test_align_falls_back_when_hw_timestamp_constant(tmp_path, caplog):
+    """hw_timestamp 全相同（退化无效）→ 退回旧路径 + warning。"""
+    import logging
+    ep = tmp_path / 'ep_const_hw.h5'
+    _make_minimal_v2_episode(ep, N=20, with_hw_ts=True)
+    import h5py
+    with h5py.File(ep, 'a') as f:
+        del f['observations/effector/hw_timestamp']
+        f.create_dataset('observations/effector/hw_timestamp',
+                         data=np.full(20, 5.0, dtype=np.float64))
+    from tools.align_offline import align_by_image_timestamp
+    with caplog.at_level(logging.WARNING):
+        aligned = align_by_image_timestamp(str(ep), on_stale='interpolate')
+    msgs = ' | '.join(r.getMessage() for r in caplog.records)
+    assert '退回' in msgs or 'fallback' in msgs.lower() or '常数' in msgs or 'unique' in msgs.lower(),         f'应 warning 提示常数 hw_ts 退回，实际日志: {msgs}'
+
+
+def test_align_falls_back_when_hw_timestamp_decreasing(tmp_path, caplog):
+    """hw_timestamp 严格递减（非单调）→ 退回旧路径。"""
+    import logging
+    ep = tmp_path / 'ep_decr_hw.h5'
+    _make_minimal_v2_episode(ep, N=20, with_hw_ts=True)
+    import h5py
+    with h5py.File(ep, 'a') as f:
+        del f['observations/effector/hw_timestamp']
+        f.create_dataset('observations/effector/hw_timestamp',
+                         data=np.linspace(10.0, 1.0, 20, dtype=np.float64))
+    from tools.align_offline import align_by_image_timestamp
+    with caplog.at_level(logging.WARNING):
+        aligned = align_by_image_timestamp(str(ep), on_stale='interpolate')
+    msgs = ' | '.join(r.getMessage() for r in caplog.records)
+    assert '退回' in msgs or 'fallback' in msgs.lower() or '单调' in msgs or 'monotonic' in msgs.lower() or 'decreasing' in msgs.lower(),         f'应 warning 提示非单调 hw_ts 退回，实际日志: {msgs}'
+
+
+def test_align_falls_back_when_hw_timestamp_low_r2(tmp_path, caplog):
+    """hw_timestamp 与 monotonic 线性度差（R² < 0.99）→ 退回。"""
+    import logging
+    ep = tmp_path / 'ep_lowr2_hw.h5'
+    _make_minimal_v2_episode(ep, N=100, with_hw_ts=True)
+    import h5py
+    with h5py.File(ep, 'a') as f:
+        eff_mono = f['observations/effector/timestamp'][...]
+        del f['observations/effector/hw_timestamp']
+        rng = np.random.default_rng(0)
+        hw_bad = np.sort((eff_mono - eff_mono.min()) ** 2 + rng.normal(0, 0.5, len(eff_mono)).cumsum())
+        f.create_dataset('observations/effector/hw_timestamp',
+                         data=hw_bad.astype(np.float64))
+    from tools.align_offline import align_by_image_timestamp
+    with caplog.at_level(logging.WARNING):
+        aligned = align_by_image_timestamp(str(ep), on_stale='interpolate')
+    msgs = ' | '.join(r.getMessage() for r in caplog.records)
+    assert 'R²' in msgs or 'R^2' in msgs or '线性度' in msgs or '退回' in msgs,         f'应 warning 提示低 R² 退回，实际日志: {msgs}'
+
+
+def test_align_uses_hw_timestamp_passes_all_gates(tmp_path, caplog):
+    """正常 hw_timestamp（单调+高 R²）→ 走精确路径（既有正路径测试，确认 gate 不误伤）。"""
+    import logging
+    ep = tmp_path / 'ep_good_hw.h5'
+    _make_minimal_v2_episode(ep, N=20, with_hw_ts=True)
+    from tools.align_offline import align_by_image_timestamp
+    with caplog.at_level(logging.INFO):
+        aligned = align_by_image_timestamp(str(ep), on_stale='interpolate')
+    msgs = ' | '.join(r.getMessage() for r in caplog.records)
+    assert '精确对齐' in msgs or 'R²' in msgs, f'正常 hw_ts 应走精确路径，实际日志: {msgs}'
