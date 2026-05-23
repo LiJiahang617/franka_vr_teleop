@@ -107,6 +107,11 @@ class RecorderController:
         # 缺陷 2：记录第一路相机名和录制起点（attach_record_args / _handle_start_cmd 填充）
         self._first_cam: Optional[str] = None
         self._record_t0: float = 0.0
+        # Preview sampler：waiting/standby 状态下持续 read cam 填 _latest_frames
+        # 让 UI 预览在录制开始前就能显示（否则 /api/preview/<cam> 永远 404）
+        self._preview_thread: Optional[threading.Thread] = None
+        self._preview_stop: Optional[threading.Event] = None
+        self._preview_paused: bool = False  # recording 时置 True，让 frame_observer 接管
 
     # ---------- 按钮动作（写 events dict，等价键盘输入） ----------
 
@@ -215,6 +220,67 @@ class RecorderController:
         with self._lock:
             arr = self._latest_frames.get(cam_name)
             return arr.copy() if arr is not None else None
+
+    # ---------- Preview sampler：standby 时 UI 也能看相机 ----------
+
+    def start_preview_sampler(self, cameras: dict, fps: float = 10.0) -> None:
+        """启动 preview sampler 线程：standby 时持续 read 各路 cam 填 _latest_frames。
+
+        UI 设计原本只在 RECORDING 时通过 frame_observer 写 _latest_frames，
+        waiting/initializing 状态下 /api/preview/<cam> 永远 404。本线程兜底：
+        - standby 时（_preview_paused=False）：10Hz read cam 填缓存
+        - recording 时（_preview_paused=True）：跳过 read，让 frame_observer 接管
+
+        Args:
+            cameras: dict[cam_name, camera_obj]，cam.read() 返 ndarray 或 (ndarray, hw_ts)
+            fps: preview 采样率，默认 10Hz（够流畅，不抢真 record 30Hz）
+        """
+        if self._preview_thread is not None:
+            return  # 已启动
+        self._preview_stop = threading.Event()
+
+        def _loop():
+            period = 1.0 / fps
+            while not self._preview_stop.is_set():
+                if not self._preview_paused:
+                    for cn, cam in cameras.items():
+                        try:
+                            img = cam.read()
+                            # RealsenseHwWrapper.read() 返 (rgb, hw_ts) tuple
+                            if isinstance(img, tuple) and len(img) == 2:
+                                img = img[0]
+                            if img is not None and hasattr(img, "shape"):
+                                self.update_latest_frame(cn, img)
+                        except Exception as e:
+                            log.warning(
+                                f"[preview_sampler] {cn} read 失败: {type(e).__name__}: {e}"
+                            )
+                self._preview_stop.wait(period)
+
+        self._preview_thread = threading.Thread(
+            target=_loop, name="PreviewSampler", daemon=True
+        )
+        self._preview_thread.start()
+        log.info(f"[preview_sampler] 启动，{len(cameras)} 路相机 @{fps}Hz")
+
+    def stop_preview_sampler(self, timeout: float = 2.0) -> None:
+        """停止 preview sampler 线程（cleanup 时调用）。"""
+        if self._preview_thread is None:
+            return
+        if self._preview_stop is not None:
+            self._preview_stop.set()
+        self._preview_thread.join(timeout=timeout)
+        if self._preview_thread.is_alive():
+            log.warning(f"[preview_sampler] 在 {timeout}s 内未停止")
+        self._preview_thread = None
+
+    def pause_preview_sampler(self) -> None:
+        """录制开始时调：暂停 preview sampler，让 record_episode 的 frame_observer 接管。"""
+        self._preview_paused = True
+
+    def resume_preview_sampler(self) -> None:
+        """录制结束/丢弃后调：恢复 preview sampler，standby 时 UI 仍能看预览。"""
+        self._preview_paused = False
 
     # ---------- Task 5：录制参数装载 + 后台线程 ----------
 

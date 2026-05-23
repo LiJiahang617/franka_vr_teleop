@@ -256,6 +256,7 @@ def main():
     try:
         # 启动后台录制线程（等待 UI 发 'start' 命令）
         controller.start()
+        controller.start_preview_sampler(robot.cameras)
         # 阻塞在 Flask 服务器（threaded=True 多线程处理请求；use_reloader=False 防双进程触发硬件初始化两次）
         app.run(
             host=ui_cfg["host"],
@@ -266,6 +267,7 @@ def main():
         )
     finally:
         # 有序清理：先停录制线程 → 等 join → 再断硬件
+        controller.stop_preview_sampler()
         controller.stop_recording()
         controller.wait_until_done(timeout=10)
         robot.disconnect()
