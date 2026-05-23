@@ -119,6 +119,15 @@ def write_episode(path, frames, *, task_name, target_fps, oc2base_R, quality,
         eff.create_dataset("timestamp", data=effector_ts)
         eff.create_dataset("stale", data=effector_stale)
 
+        # 可选字段 effector/hw_timestamp：全帧 None → 不写；否则 None→NaN
+        hw_ts_vals = [fr.get("effector_hw_ts") for fr in b]
+        if any(v is not None for v in hw_ts_vals):
+            arr = np.array(
+                [v if v is not None else np.nan for v in hw_ts_vals],
+                dtype=np.float64,
+            )
+            eff.create_dataset("hw_timestamp", data=arr)
+
         cam = obs.create_group("camera")
         rgb = cam.create_group("rgb")
         for cn in _cams:

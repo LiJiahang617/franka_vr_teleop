@@ -58,3 +58,65 @@ def test_writer_rejects_empty_episode(tmp_path):
                           quality={}, vr_source="unity", cam_names=["wrist"])
     with pytest.raises(ValueError):
         w.close()  # 0 帧应拒绝
+
+
+def _frame_with_hw_ts(i, effector_hw_ts=None):
+    """生成带可选 effector_hw_ts 的测试帧（复用 _frame 结构）。"""
+    base = _frame(i)
+    base["effector_hw_ts"] = effector_hw_ts
+    return base
+
+
+def _write_ep(tmp_path, name, frames):
+    """用 write_episode 落盘辅助（统一关键字参数）。"""
+    from core.hdf5_writer import write_episode
+    out = tmp_path / name
+    write_episode(
+        str(out),
+        frames,
+        task_name="test",
+        target_fps=30.0,
+        oc2base_R=np.eye(3),
+        quality={},
+        vr_source="unity",
+        cam_names=["wrist"],
+    )
+    return out
+
+
+def test_write_episode_hw_timestamp_all_none_skips_dataset(tmp_path):
+    """全部帧 effector_hw_ts=None → 不写 observations/effector/hw_timestamp 数据集。"""
+    frames = [_frame_with_hw_ts(i, effector_hw_ts=None) for i in range(5)]
+    out = _write_ep(tmp_path, "ep_no_hw_ts.h5", frames)
+    with h5py.File(out, "r") as f:
+        assert "observations/effector/hw_timestamp" not in f, (
+            "全 None 不应写 hw_timestamp 数据集"
+        )
+
+
+def test_write_episode_hw_timestamp_all_present_writes_array(tmp_path):
+    """全部帧 effector_hw_ts 为有效 float → 写整列。"""
+    frames = [_frame_with_hw_ts(i, effector_hw_ts=100.0 + i * 0.033) for i in range(5)]
+    out = _write_ep(tmp_path, "ep_with_hw_ts.h5", frames)
+    with h5py.File(out, "r") as f:
+        assert "observations/effector/hw_timestamp" in f
+        arr = f["observations/effector/hw_timestamp"][...]
+        assert arr.shape == (5,)
+        assert arr.dtype == np.float64
+        np.testing.assert_allclose(arr, [100.0, 100.033, 100.066, 100.099, 100.132])
+
+
+def test_write_episode_hw_timestamp_partial_none_fills_nan(tmp_path):
+    """部分帧 None → 写整列，None→NaN。"""
+    frames = [
+        _frame_with_hw_ts(0, effector_hw_ts=100.0),
+        _frame_with_hw_ts(1, effector_hw_ts=None),
+        _frame_with_hw_ts(2, effector_hw_ts=100.066),
+    ]
+    out = _write_ep(tmp_path, "ep_partial_hw_ts.h5", frames)
+    with h5py.File(out, "r") as f:
+        arr = f["observations/effector/hw_timestamp"][...]
+        assert arr.shape == (3,)
+        assert arr[0] == 100.0
+        assert np.isnan(arr[1])
+        assert arr[2] == 100.066
