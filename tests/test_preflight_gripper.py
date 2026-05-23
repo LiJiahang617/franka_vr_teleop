@@ -247,3 +247,49 @@ def test_gripper_state_fields_ok_missing_field():
 def test_gripper_state_fields_ok_error_code_nonzero():
     v = pf.gripper_state_fields_ok({"error_code": 5, "is_moving": False, "width": 0.04})
     assert v.ok is False and "error_code" in v.reason
+
+
+# ---------------------------------------------------------------------------
+# 回归测试：zerorpc 异步 goto 时序 bug（2026-05-23）
+# ---------------------------------------------------------------------------
+
+def test_preflight_handles_zerorpc_async_goto_delay():
+    """根因回归：zerorpc gripper_goto(blocking=True) 实际是异步返回 —
+    franka_hand_client 启动有 ~0.1-0.3s 延迟，期间 is_moving 仍为 False、
+    width 仍是命令前的值。preflight 必须先等 is_moving=True（Phase 1）
+    再等 is_moving=False（Phase 2），否则首次 poll 立即误判已 settle，
+    record 到旧 width，三个 target 同值 → span=0 → 假阴性 'Desk Homing'。
+    """
+    class AsyncGoto:
+        """模拟 zerorpc 异步 goto：goto 后 0~0.2s 还没动；
+        0.2~0.5s 移动中；0.5s 后 settle 到 target_map 值。"""
+        def __init__(self):
+            self._map = {0.0: 0.0001, 0.07: 0.0700, 0.04: 0.0400}
+            self._w = 0.04
+            self._goto_at = None
+            self._target_w = 0.04
+        def gripper_initialize(self):
+            pass
+        def gripper_get_state(self):
+            if self._goto_at is None:
+                return {"width": self._w, "is_moving": False, "error_code": 0,
+                        "is_grasped": False, "prev_command_successful": True}
+            dt = time.monotonic() - self._goto_at
+            if dt < 0.2:
+                moving = False                  # 命令还没真正下发到硬件
+            elif dt < 0.5:
+                moving = True                   # 移动中
+            else:
+                moving = False
+                self._w = self._target_w        # settle 后 width 更新
+            return {"width": self._w, "is_moving": moving, "error_code": 0,
+                    "is_grasped": False, "prev_command_successful": True}
+        def gripper_goto(self, width, speed, force, ei=-1.0, eo=-1.0, blocking=True):
+            self._goto_at = time.monotonic()
+            self._target_w = self._map.get(round(width, 4), width)
+
+    g = AsyncGoto()
+    res = pf.run_gripper_preflight(
+        client=g, proc_probe=lambda: True, log_probe=lambda: True,
+        targets=(0.0, 0.07, 0.04), settle_timeout=2.0, poll=0.05)
+    assert res.ok is True, f"应通过，实际: {res.reason}"

@@ -230,11 +230,26 @@ def run_gripper_preflight(
         # gripper_goto(width, speed, force, epsilon_inner, epsilon_outer, blocking)
         # — zerorpc FrankaInterfaceClient 既有签名（与 Franka.reset 同款用法）
         client.gripper_goto(target, 0.05, 20.0, -1.0, -1.0, True)
-        # settle：轮询直到 is_moving=False 或超时（给足行程时间，**非**固定 0.5s）
         t0 = time.monotonic()
+        # Phase 1：等 is_moving 先变 True（zerorpc goto 异步返回，
+        # 命令到 franka_hand_client 真正开始执行有 ~0.1-0.3s 延迟；
+        # 否则首次 poll 就读到 is_moving=False 误判已 settle）。
+        # 最多等 1.5s；超时则视为夹爪压根没动（不算 settle，记当前 width 即可）。
+        moving_start_deadline = t0 + 1.5
+        while time.monotonic() < moving_start_deadline:
+            s = client.gripper_get_state()
+            if "is_moving" not in s:
+                return Verdict(
+                    ok=False,
+                    reason="夹爪 get_state 缺 is_moving → 客户端异常，重起 _run_gripper.sh",
+                )
+            if s["is_moving"]:
+                break
+            if poll > 0:
+                time.sleep(poll)
+        # Phase 2：等 is_moving=False（动作完成）或超时
         while True:
             s = client.gripper_get_state()
-            # 缺 is_moving 字段不静默当 False，立即返回可行动错误
             if "is_moving" not in s:
                 return Verdict(
                     ok=False,
