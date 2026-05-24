@@ -520,6 +520,17 @@ class RecorderController:
             if teleop is None or robot is None:
                 return
             action = teleop.get_action()
+            # INFO 诊断: 每 30 tick (~1s) 打一次, 让用户从 /tmp/ui_*.log 直观看到 vr loop 真在跑 + 当前 delta/gripper/arm_enabled 状态
+            if not hasattr(self, "_vrloop_dbg_n"):
+                self._vrloop_dbg_n = 0
+            self._vrloop_dbg_n += 1
+            if self._vrloop_dbg_n % 30 == 1:
+                _dx = action.get("delta_ee_pose.x", 0.0) if isinstance(action, dict) else None
+                _dy = action.get("delta_ee_pose.y", 0.0) if isinstance(action, dict) else None
+                _dz = action.get("delta_ee_pose.z", 0.0) if isinstance(action, dict) else None
+                _gp = action.get("gripper_cmd_bin") if isinstance(action, dict) else None
+                _ae = getattr(robot, "_arm_control_enabled", "?")
+                log.info(f"[VR-LOOP] tick#{self._vrloop_dbg_n} dxyz=({_dx},{_dy},{_dz}) grip={_gp} arm_en={_ae}")
             robot.send_action(action)
         except Exception as e:
             # vr loop 异常仅 log warning, 不抛 (避免单帧异常打断主循环)

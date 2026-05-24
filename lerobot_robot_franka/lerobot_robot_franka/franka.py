@@ -365,8 +365,11 @@ class Franka(Robot):
                         logger.warning(f"[ROBOT] zerorpc error during interpolation step {step}: {e}")
                         break
                     time.sleep(0.01)  # 每步间隔 10ms
-            elif np.linalg.norm(delta_ee_pose) >= 0.01:
-                # 正常小动作，直接执行
+            else:
+                # 正常小动作或零 delta (keep-alive): 直接执行 update.
+                # 零 delta 时 target = 当前 ee_pose (无运动), 仅用于保持 polymetis
+                # controller alive (无 update 超 ~1s 会 stale terminate, 导致
+                # vr_enable 后用户首次按 trigger 时 controller 已死 → 末端不动).
                 target_position = ee_pose[:3] + delta_ee_pose[:3]
                 current_rot = st.Rotation.from_rotvec(ee_pose[3:])
                 delta_rot = st.Rotation.from_rotvec(delta_ee_pose[3:])
