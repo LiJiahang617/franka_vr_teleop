@@ -13,7 +13,7 @@ record:
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 
   # hdf5 输出目录; CLI --out-dir 仅临时覆盖; 缺省回退 paths.HDF5_EPISODES_DIR
-  out_dir: "/home/ubuntu/Desktop/jhli/_hdf5_episodes"
+  out_dir: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/recordings"  # UI 录制 .h5 落盘位置 (可改); 默认项目内 recordings/
 
   # §11.2 色彩通道序预检（RealSense BGR vs RGB 误判 guard）; false 关闭
   color_preflight: true

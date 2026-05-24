@@ -586,8 +586,8 @@ class RecorderController:
             log.error(f"[RecorderController] _handle_start_cmd 切 RECORDING 失败: {e}; 拒绝调 run_fn")
             self._log(f"[REC] 启动失败: {e}")
             return
-        # Bug 5: 录制启动事件 → _log_tail → UI 实时显示
-        next_ep = self._ep_count
+        # Bug 5: 录制启动事件 → _log_tail → UI 实时显示 (1-based 编号)
+        next_ep = self._ep_count + 1  # 即将开始的第 N 条 (与最终 ep_count 一致)
         self._log(f"[REC] 开始录制 episode #{next_ep}")
 
         # Stale controller fix (2026-05-24): polymetis joint impedance stale timeout
@@ -641,9 +641,12 @@ class RecorderController:
             # Bug 5: 决策事件 → UI 实时显示
             frames_recorded = frame_state["count"]
             if action == "keep":
-                self._log(f"[REC] episode #{ep} 保存中（{frames_recorded} 帧）...")
+                # Bug fix: keep 分支 increment ep_count (status_snapshot 'episode_count' 才会涨)
+                self.increment_episode_count()
+                self._log(f"[REC] episode #{self._ep_count} 保存中（{frames_recorded} 帧）...")
             elif action == "discard":
-                self._log(f"[REC] episode #{ep} 已丢弃（{frames_recorded} 帧）")
+                # discard 不 increment, 显示尝试的索引 = ep_count + 1
+                self._log(f"[REC] episode #{self._ep_count + 1} 已丢弃（{frames_recorded} 帧）")
             elif action == "stop":
                 self._log(f"[REC] 收到停止信号，退出录制（{frames_recorded} 帧）")
             # stop 不 reset：stop_recording 是全局停止标志，保留让 run_episodes 跳出循环
