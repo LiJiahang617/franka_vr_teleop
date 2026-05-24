@@ -1,0 +1,32 @@
+# Franka VR Teleoperation & Data Collection — 直接依赖
+# 注: lerobot 不在此列, 通过 git clone 后 pip install -e ../lerobot 安装 (见 setup.sh)
+# 注: polymetis-local 需单独从源码编译 (见 docs/POLYMETIS_BUILD.md)
+
+# 数值 / 科学计算
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+pyarrow>=12.0
+
+# 深度学习
+torch>=2.0
+torchvision>=0.15
+
+# 相机 / 图像
+pyrealsense2>=2.54
+opencv-python-headless>=4.8
+Pillow>=10.0
+
+# Web / RPC
+flask>=3.0
+werkzeug>=3.0
+requests>=2.30
+zerorpc>=0.6
+
+# 数据存储
+h5py>=3.9
+pyyaml>=6.0
+
+# 可视化 / 日志
+rerun-sdk>=0.20
+tqdm>=4.65

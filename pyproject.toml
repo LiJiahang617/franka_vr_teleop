@@ -1,0 +1,26 @@
+[project]
+name = "lerobot-franka-teleop"
+version = "0.1.0"
+description = "Franka VR Teleoperation & Data Collection"
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "jhli", email = "lijiahang0617@gmail.com"},
+]
+keywords = ["franka", "teleoperation", "vr", "lerobot", "robotics"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/jhli/lerobot_franka_teleop"
+
+# 说明:
+#   实际依赖列表见 requirements.txt (开源用户用 setup.sh 安装)
+#   子包安装 (lerobot_robot_franka / lerobot_teleoperator_franka) 通过 setup.py 完成
+#   pyproject.toml 暂只标记 metadata, 与 setup.py 共存 (setup.py 负责 entry_points + 子包发现)
