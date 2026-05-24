@@ -141,6 +141,8 @@ franka_vr_teleop/
 
 ## Usage
 
+> ⚠️ **运行任何命令前必须先 ** (或用  绝对路径). 用 base env 会撞 ModuleNotFoundError.
+
 ### 录第一条数据（最小示例）
 
 ```bash

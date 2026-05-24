@@ -82,6 +82,8 @@ cp scripts/config/record_cfg_unityvr.yaml my_cfg.yaml
 
 ## 5. 启 Web UI 录制
 
+> ⚠️ **运行前必须**  (主项目 env). base env 没装 werkzeug/flask, 会撞 ModuleNotFoundError.
+
 ```bash
 python scripts/core/run_record_hdf5_ui.py --config my_cfg.yaml
 ```
