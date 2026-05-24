@@ -74,7 +74,10 @@ record:
 
   task:
     description: "pick up the object and place it in the target zone"  # 改成自己的任务描述, 例: "pick up the Shanghai Green and put them into the brown basket"
-    num_episodes: 1                            # UI 模式: 每次点开始录此数量条 (默认 1)
+    num_episodes: 1                            # 每次点'开始录制'按钮录此数量条 ep:
+                                               #   1   = 单条模式: 录 1 条 save 后回 waiting 等再点 start (推荐, 你主导节奏)
+                                               #   N>1 = 连录模式: save 后自动开始第 2/3/.../N 条 (批量场景一次录 N 条)
+                                               # UI session 总条数不限, 想录多少就点几次 start
 
   time:
     episode_time_sec: 6000                     # 每 ep 最长时长 (秒)
