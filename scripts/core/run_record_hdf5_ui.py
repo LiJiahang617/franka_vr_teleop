@@ -23,6 +23,7 @@ import threading
 
 import numpy as np
 import yaml
+from werkzeug.serving import make_server  # H3 fix: graceful shutdown 替 app.run
 
 from pathlib import Path as _Path
 
@@ -258,22 +259,23 @@ def main():
     # 原因：原 controller daemon thread 跑 run_episodes 触发 zerorpc gevent
     # thread-affinity 死锁（lesson 2026-05-24-phaseE-ui-zerorpc-gevent-daemon-thread.md）。
     # zerorpc client 在 build_robot_and_teleop 主线程创建，必须由主线程消费命令。
+    #
+    # H3 fix: 用 werkzeug.make_server 拿到 server 句柄，daemon=False + finally
+    # 里 server.shutdown() + thread.join，避免 POST 中途被 daemon=True 强杀
+    # （/save_episode、/start 等关键请求可能正在落盘）。
+    http_server = make_server(
+        ui_cfg["host"], ui_cfg["port"], app, threaded=True
+    )
     flask_thread = threading.Thread(
-        target=app.run,
-        kwargs=dict(
-            host=ui_cfg["host"],
-            port=ui_cfg["port"],
-            threaded=True,
-            debug=False,
-            use_reloader=False,
-        ),
-        daemon=True,
+        target=http_server.serve_forever,
+        daemon=False,
         name="flask-server",
     )
     flask_thread.start()
 
     try:
         # prepare() 仅切状态机 INITIALIZING → WAITING（不启 daemon thread）
+        # H4 fix: prepare 现 fail-loud，IllegalTransition 直接抛到此处由 finally 兜底
         controller.prepare()
         # preview sampler 用 daemon thread read cam（不调 zerorpc，OK）
         controller.start_preview_sampler(robot.cameras)
@@ -282,11 +284,29 @@ def main():
     except KeyboardInterrupt:
         log.info("[UI] Ctrl+C，优雅退出")
     finally:
-        # 有序清理：停 preview → 写 stop_recording 标志 → 断硬件
-        controller.stop_preview_sampler()
-        controller.stop_recording()
-        robot.disconnect()
-        teleop.disconnect()
+        # 有序清理：①优雅停 Flask（等在飞请求完成）→ ②停 preview → ③stop_recording
+        # → ④断硬件。Flask 先停可阻止新 /api 请求触发 controller 操作。
+        log.info("[UI] 优雅停 Flask 服务器（等在飞请求 ≤5s）...")
+        try:
+            http_server.shutdown()
+        except Exception as e:
+            log.warning(f"[UI] http_server.shutdown 异常: {e}")
+        flask_thread.join(timeout=5)
+        if flask_thread.is_alive():
+            log.warning("[UI] Flask thread 5s 内未退出")
+        # H2 fix: 每步独立 try/except，前一步异常不阻断后续 cleanup。
+        # 含义：zerorpc 调用在 KI 后状态可能不一致，disconnect 自身可能抛；
+        # 我们记录异常但保证 robot/teleop 都被尝试断开。
+        for _name, _fn in [
+            ("stop_preview_sampler", controller.stop_preview_sampler),
+            ("stop_recording", controller.stop_recording),
+            ("robot.disconnect", robot.disconnect),
+            ("teleop.disconnect", teleop.disconnect),
+        ]:
+            try:
+                _fn()
+            except Exception as e:
+                log.warning(f"[UI] cleanup {_name} 异常（继续后续清理）: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

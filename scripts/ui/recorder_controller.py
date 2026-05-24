@@ -341,14 +341,16 @@ class RecorderController:
         状态机：INITIALIZING → WAITING。
         """
         self._should_stop = False
-        self._recorder_thread = threading.Thread(
-            target=self._record_main, daemon=True, name="recorder-main"
-        )
-        self._recorder_thread.start()
+        # H4 顺带 fix: 先切状态机再启 daemon，避免 daemon 先于 transition 到达
+        # _handle_start_cmd 时撞上 INITIALIZING → RECORDING 非法迁移。
         try:
             self._sm.transition(UIState.WAITING)
         except IllegalTransition as e:
             log.warning(f"[RecorderController] start() 状态切换失败: {e}")
+        self._recorder_thread = threading.Thread(
+            target=self._record_main, daemon=True, name="recorder-main"
+        )
+        self._recorder_thread.start()
 
     def prepare(self) -> None:
         """仅切状态机 INITIALIZING → WAITING，不启 daemon thread（真机入口用）。
@@ -356,12 +358,12 @@ class RecorderController:
         与 `start()` 区别：本方法不启动 daemon，命令消费交给主线程
         `consume_commands_blocking()` 处理。zerorpc 调用回到 client 创建
         所在的主线程，绕开 gevent thread-affinity 死锁。
+
+        H4 fix: 状态机失败 fail-loud (raise)。原 log.warning 让 main 在异常状态下
+        仍进入命令消费循环+发真机动作，是 silent-broken。
         """
         self._should_stop = False
-        try:
-            self._sm.transition(UIState.WAITING)
-        except IllegalTransition as e:
-            log.warning(f"[RecorderController] prepare() 状态切换失败: {e}")
+        self._sm.transition(UIState.WAITING)  # IllegalTransition 直接抛给 main
 
     def consume_commands_blocking(self) -> None:
         """主线程阻塞消费命令队列（替代原 daemon thread `_record_main`）。
@@ -373,7 +375,8 @@ class RecorderController:
         的 gevent Hub 同线程，绕开 thread-affinity 死锁。
         """
         log.info("[RecorderController] 主线程命令消费循环启动")
-        self._should_stop = False
+        # H1 fix: 不在此重置 _should_stop（prepare() 已设；若 Flask handler 在 prepare→进循环
+        # 窗口内已写入 stop_recording()，重置会吞掉该信号导致 UI Stop 丢失）
         while not self._should_stop:
             try:
                 cmd = self._cmd_q.get(timeout=0.1)
@@ -457,10 +460,12 @@ class RecorderController:
             return
 
         # 状态机 WAITING → RECORDING
+        # H4 fix: transition 失败 → 短路返回，绝不进入 run_fn 发真机动作。
         try:
             self._sm.transition(UIState.RECORDING)
         except IllegalTransition as e:
-            log.warning(f"[RecorderController] _handle_start_cmd 切 RECORDING 失败: {e}")
+            log.error(f"[RecorderController] _handle_start_cmd 切 RECORDING 失败: {e}; 拒绝调 run_fn")
+            return
 
         # 录制前完全停 preview sampler 并等其退出，让 cam pipeline 释放
         self.stop_preview_sampler(timeout=2.0)
