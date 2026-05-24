@@ -381,6 +381,17 @@ def run_controller_preflight(
     Returns:
         Verdict(ok=True) 控制器就绪；Verdict(ok=False, reason=...) 失败有可行动指引。
     """
+    # env var 未展开 fail-loud (yaml 用 ${POLYMETIS_ENV} placeholder, 用户没 export 时清晰报错)
+    import os as _os
+    if "${" in polymetis_python or "${" in polymetis_conda_prefix:
+        return Verdict(
+            ok=False,
+            reason=(
+                f"yaml controller_preflight 路径含未展开 env var (POLYMETIS_ENV 未 export). "
+                f"修复: export POLYMETIS_ENV=/path/to/polymetis-local 或在 yaml 改为绝对路径. "
+                f"当前: {polymetis_python!r}"
+            ),
+        )
     if starter is None:
         # subprocess 调 polymetis-local Python 启动 joint impedance
         # 先 terminate_current_policy 干掉任何残留 policy（cartesian/旧 joint），
