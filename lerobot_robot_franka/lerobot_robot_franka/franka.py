@@ -64,11 +64,38 @@ class Franka(Robot):
         if not self.is_connected or self._robot is None:
             logger.warning("[ROBOT] enable_arm_control 失败: robot 未连接")
             return False
+
+        # 探活: 如果 controller 已健康在跑(preflight 启过), 直接复用,
+        # 不再重复 SetController. 实机日志确认: 在已有 joint impedance 上
+        # hot-swap 同类型新 policy 会触发 libfranka communication_constraints_violation
+        # reflex → 自动 error recovery (~1s) → polymetis validRobotContext 超 1s 阈值
+        # → "Terminating custom controller" → 后续 update 全部 "no controller running".
+        # 故策略: 探活 update 成功就只翻 flag; 仅在确实没有 controller 时才 start.
+        #
+        # 注意: FrankaInterfaceClient.robot_update_desired_ee_pose 包装器吞异常 + 要求
+        # np.ndarray, 不能用来做探活. 直接走 zerorpc server 拿到 raise 行为.
+        probe_ok = False
         try:
-            # 幂等: polymetis 内部能识别重复启动
+            ee = self._robot.robot_get_ee_pose()
+            self._robot.server.robot_update_desired_ee_pose(list(ee))
+            probe_ok = True
+        except Exception as probe_exc:
+            logger.info(f"[ROBOT] 现有 controller 不可用 ({type(probe_exc).__name__}: {str(probe_exc)[:120]}), 启新 joint impedance")
+
+        if probe_ok:
+            self._arm_control_enabled = True
+            logger.info("[ROBOT] 臂控已启用 (复用现有 joint impedance controller)")
+            return True
+
+        # 没有可用 controller, 先 terminate 残留 (无残留时会抛, 忽略) 再 start
+        try:
+            self._robot.robot_terminate_current_policy()
+        except Exception:
+            pass
+        try:
             self._robot.robot_start_joint_impedance_control()
             self._arm_control_enabled = True
-            logger.info("[ROBOT] 臂控已启用 (joint impedance running)")
+            logger.info("[ROBOT] 臂控已启用 (新 joint impedance 已 load)")
             return True
         except Exception as e:
             logger.error(f"[ROBOT] enable_arm_control 失败: {e}")
@@ -85,6 +112,29 @@ class Franka(Robot):
 
     def is_arm_control_enabled(self) -> bool:
         return self._arm_control_enabled
+
+    def open_gripper_max(self, blocking: bool = True) -> bool:
+        """把夹爪开到 config.gripper_max_open. 录制起点用, 保证每条 ep 始于全开.
+
+        Args:
+            blocking: True 等到夹爪 settle 才返回 (~0.5s); False 入队立即返回.
+
+        Returns:
+            True 调用成功; False 未连接或异常.
+        """
+        if not self.is_connected or self._robot is None:
+            return False
+        try:
+            self._robot.gripper_goto(
+                width=self.config.gripper_max_open,
+                speed=self._gripper_speed,
+                force=self._gripper_force,
+                blocking=blocking,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[ROBOT] open_gripper_max 失败: {e}")
+            return False
 
     def connect(self) -> None:
         if self.is_connected:

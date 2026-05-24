@@ -595,6 +595,15 @@ class RecorderController:
                 else:
                     self._log("[REC] 警告: controller 重启失败, send_action 可能报 no controller running")
 
+        # 录制起点强制夹爪到最大开度: 避免连录 N 条时夹爪保留上一条结尾闭合状态 → 脏数据
+        rbt2 = (self._record_args or {}).get("robot")
+        if rbt2 is not None and hasattr(rbt2, "open_gripper_max"):
+            ok_grip = rbt2.open_gripper_max(blocking=True)
+            if ok_grip:
+                self._log("[REC] 录制起点夹爪已开到最大")
+            else:
+                self._log("[REC] 警告: 夹爪开启失败 (未连接或 zerorpc 异常), 继续录制")
+
         # 录制前完全停 preview sampler 并等其退出，让 cam pipeline 释放
         self.stop_preview_sampler(timeout=2.0)
 
