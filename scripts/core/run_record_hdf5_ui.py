@@ -157,6 +157,14 @@ def main():
     robot, teleop, gripper_max_open = build_robot_and_teleop(record_cfg, fps)
     os.makedirs(out_dir, exist_ok=True)
 
+    # A: 每次启动 UI 建 session 子目录, 让多次启动数据分组
+    import datetime as _dt
+    _session_name = "session-" + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = os.path.join(out_dir, _session_name)
+    os.makedirs(session_dir, exist_ok=True)
+    log.info(f"[UI] session 目录: {session_dir} (此次启动的 .hdf5 全落入)")
+    out_dir = session_dir
+
     cam_names = list(robot.cameras.keys())
     log.info(f"[UI] 检测到相机: {cam_names}")
 
@@ -277,6 +285,9 @@ def main():
 
         if not reset_between_episodes:
             kwargs["reset_fn"] = None  # 仅切断 run_episodes 的自动 reset
+
+        # A: ep_offset 用 controller._ep_count, 让 episode_{idx:06d}.hdf5 跨多次 start 不冲突
+        kwargs["ep_offset"] = controller._ep_count
 
         with AsyncEpisodeSaver(sink=_sink, maxsize=getattr(record_cfg, "async_saver_maxsize", 5)) as saver_real:
             _saver_holder["s"] = saver_real

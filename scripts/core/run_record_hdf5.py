@@ -624,7 +624,7 @@ def record_episode(robot, teleop, fps: float, max_sec: float,
 def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
                  cam_names, out_dir, task_name, oc2base_R, vr_source,
                  episodes, decide, reset_fn=None, reset_wait=0.0,
-                 stop_flag=None, frame_observer=None):
+                 stop_flag=None, frame_observer=None, ep_offset: int = 0):
     """episode 循环编排：录完→deepcopy→submit→新 buffer（非阻塞）。
 
     "采集"与"落盘"解耦：
@@ -688,7 +688,11 @@ def run_episodes(robot, teleop, saver, *, fps, episode_sec, gripper_max_open,
             buf = None
         else:
             # keep：deepcopy 必须在 buf 复用/清空前，编码已在 record_episode 内完成
-            path = f"{out_dir}/ep{ep:04d}_{int(time.time())}.h5"
+            # 命名对齐 LeRobot 上游 (episode_{idx:06d}.hdf5); global_ep_idx = ep + ep_offset
+            # UI 模式 ep_offset=controller._ep_count, 跨多次 start 不冲突;
+            # terminal 模式 ep_offset=0, ep 是 for 循环 0..N-1.
+            global_ep_idx = ep + ep_offset
+            path = f"{out_dir}/episode_{global_ep_idx:06d}.hdf5"
             payload = copy.deepcopy({  # 整体 deepcopy：frames+meta 一次隔离，消除 oc2base_R/cam_names 别名风险
                 "frames": buf,
                 "meta": dict(

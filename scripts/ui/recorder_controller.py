@@ -464,27 +464,66 @@ class RecorderController:
         log.info("[RecorderController] 主线程命令消费循环启动")
         # H1 fix: 不在此重置 _should_stop（prepare() 已设；若 Flask handler 在 prepare→进循环
         # 窗口内已写入 stop_recording()，重置会吞掉该信号导致 UI Stop 丢失）
+        #
+        # VR 跟随分离 (2026-05-24): 主循环每 tick 既消费命令, 又跑 teleop loop.
+        # vr_control_enabled=True + state=WAITING 时, 每 tick 调 teleop.get_action +
+        # robot.send_action, 让 VR 跟手. state=RECORDING/CALIBRATING 时主循环空转,
+        # record_episode/payload_calib 子进程内部已接管 teleop+send_action.
         while not self._should_stop:
             try:
-                cmd = self._cmd_q.get(timeout=0.1)
+                cmd = self._cmd_q.get(timeout=0.033)  # 30Hz tick (兼顾 vr loop + cmd 响应)
+                _has_cmd = True
             except queue.Empty:
-                continue
+                _has_cmd = False
 
-            if cmd == "start":
-                self._handle_start_cmd()
-            elif cmd == "home":
-                self._handle_home_cmd()
-            elif cmd == "payload_calib":
-                self._handle_payload_calib_cmd(dry_run=False)
-            elif cmd == "payload_calib_dry":
-                self._handle_payload_calib_cmd(dry_run=True)
-            elif cmd == "vr_enable":
-                self._handle_vr_enable_cmd()
-            elif cmd == "vr_disable":
-                self._handle_vr_disable_cmd()
-            else:
-                log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
+            if _has_cmd:
+                if cmd == "start":
+                    self._handle_start_cmd()
+                elif cmd == "home":
+                    self._handle_home_cmd()
+                elif cmd == "payload_calib":
+                    self._handle_payload_calib_cmd(dry_run=False)
+                elif cmd == "payload_calib_dry":
+                    self._handle_payload_calib_cmd(dry_run=True)
+                elif cmd == "vr_enable":
+                    self._handle_vr_enable_cmd()
+                elif cmd == "vr_disable":
+                    self._handle_vr_disable_cmd()
+                else:
+                    log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
+            # VR loop tick (vr_enabled + WAITING 时跑 teleop+send_action)
+            self._tick_vr_loop()
         log.info("[RecorderController] 主线程命令消费循环退出")
+
+    def _tick_vr_loop(self) -> None:
+        """VR 跟随分离: vr_enabled + WAITING 时每 tick 调 teleop.get_action+robot.send_action.
+
+        让用户点 vr_enable 后立刻能控制末端 (不必先点开始录制).
+        state=RECORDING/CALIBRATING 时跳过 (record_episode/payload_calib 已接管 teleop loop).
+        zerorpc 调用在主线程, gevent thread-affinity 安全.
+        """
+        # 仅 WAITING 状态跑 (其他状态 record_episode/calib subprocess 接管)
+        try:
+            from ui_state import UIState
+        except ImportError:
+            UIState = self._sm.state.__class__
+        if self._sm.state != UIState.WAITING:
+            return
+        # 必须 vr_control_enabled (robot._arm_control_enabled=True)
+        if not self.is_vr_control_enabled():
+            return
+        if self._record_args is None:
+            return
+        try:
+            teleop = self._record_args.get("teleop")
+            robot = self._record_args.get("robot")
+            if teleop is None or robot is None:
+                return
+            action = teleop.get_action()
+            robot.send_action(action)
+        except Exception as e:
+            # vr loop 异常仅 log warning, 不抛 (避免单帧异常打断主循环)
+            log.warning(f"[VR-LOOP] teleop+send_action 异常: {type(e).__name__}: {e}")
 
     def update_recording_progress(self, *, frame_count: int, duration_sec: float) -> None:
         """更新当前 episode 录制进度（后台线程 frame_observer 调用，线程安全）。
