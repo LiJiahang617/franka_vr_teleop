@@ -1,161 +1,106 @@
+# Franka 数采 UI 配置 (UI 模式入口: scripts/core/run_record_hdf5_ui.py)
+# 关键字段都在 record.* 下, 直接改这里, 重启 UI 生效.
+
 record:
-  repo_id: &repo_id "babycare/milk_power_2"
-  # repo_id: &repo_id "PhysBrain/PnP_Veg"
-  # repo_id: &repo_id "scylearning/pick_greencube_into_trashb
-  # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
-  # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
-  debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
-  user_notes:  # 数采备注（如环境/任务变化）; hdf5 入口现读此 cfg（CLI 仅覆盖）
-  fps: 30 # 录制频率单一来源(相机/循环/写盘同源); CLI --fps 仅临时覆盖
-  reset_between_episodes: false   # Bug2 fix: save 后不自动回 home, 用户手动点回 Home  # episode 间自动调 robot.reset() 回 HOME_JOINT_POSITION+夹爪复位; false=关闭
-  reset_wait: 1.0               # reset 后等待机械臂稳定的时间（秒）; 仅 run_record_hdf5 读取
-  control_mode: &control_mode "unityvr" # unityvr(世界系,头显独立) / isoteleop / spacemouse / oculus
-  run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
+  repo_id: "local/franka_dataset"             # 数据集名称 (hf 风格, 仅 lerobot 转换器读)
+  debug: 0                                     # 调试模式 (0=真机)
+  user_notes:                                  # 数采备注 (写 hdf5)
+  fps: 15                                      # 录制帧率单一来源 (Hz); 相机/循环/写盘同源
+  reset_between_episodes: false                # save 后是否自动调 robot.reset (false=用户手动点回 Home)
+  reset_wait: 1.0                              # reset 后等待机械臂稳定时间 (秒)
+  control_mode: &control_mode "unityvr"        # 控制模式 (当前仅支持 unityvr)
+  color_preflight: true                        # 启动期色彩通道序预检 (BGR vs RGB)
 
-  # hdf5 输出目录; CLI --out-dir 仅临时覆盖; 缺省回退 paths.HDF5_EPISODES_DIR
-  out_dir: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/recordings"  # UI 录制 .h5 落盘位置 (可改); 默认项目内 recordings/
+  # hdf5 落盘目录 (UI 录制 .h5 存放位置)
+  out_dir: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/recordings"
 
-  # §11.2 色彩通道序预检（RealSense BGR vs RGB 误判 guard）; false 关闭
-  color_preflight: true
+  # AsyncEpisodeSaver 队列深度; 长 ep 写盘慢时排队的最大数量, 满则 submit 抛 QueueFullError
+  async_saver_maxsize: 5
 
-  # Phase E Web UI 配置段（默认 enabled: false = 键盘模式，不影响现有 run_record.py 入口）
   ui:
-    enabled: true               # true → 走 UI 模式（新入口 run_record_hdf5_ui.py）; false = 键盘模式（现有 run_record）
-    host: "0.0.0.0"             # Flask 绑定 IP; 本机访问可改 "127.0.0.1"，远程访问保持 "0.0.0.0"
-    port: 5055                  # Flask 端口（避开 polymetis 50051 / zerorpc 4242 / gripper 50052）
-    preview_max_w: 320          # 预览图像最大宽度（像素）; 实际按原始比例等比缩放
-    preview_max_h: 240          # 预览图像最大高度（像素）
-    preview_quality: 60         # JPEG 预览压缩质量（1-100）; 值越低带宽越低
-    status_poll_hz: 30          # 前端状态轮询频率参考（前端 setInterval 当前写死 33ms=~30Hz）
+    enabled: true                              # true → UI 模式; false → 键盘模式 (run_record_hdf5.py)
+    host: "0.0.0.0"                           # Flask 绑定 (本机访问可改 127.0.0.1)
+    port: 5055                                 # Flask 端口
+    preview_max_w: 320                         # 预览图像最大宽 (px)
+    preview_max_h: 240                         # 预览图像最大高 (px)
+    preview_quality: 60                        # JPEG 预览压缩质量 (1-100)
+    status_poll_hz: 30                         # 前端轮询参考 (前端 setInterval 写死 33ms)
 
-  # 深度相机采集开关——占位至 Phase D，不写 hdf5 不进 schema
+  # 深度相机采集 (Phase D 占位, 当前未接通)
   depth:
     enabled: false
 
-
-  # 控制器预检：录制前幂等启动 cartesian impedance controller
-  # 防止 _run_polymetis_rw.sh 后台异步启 controller 偶发性失败导致主循环 send_action 报 "no controller running"
-  controller_preflight:
-    enabled: true                                                          # false → 跳过控制器预检
-    polymetis_python: "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python"   # polymetis venv python 绝对路径
-    polymetis_conda_prefix: "/home/ubuntu/Desktop/jhli/envs/polymetis-local"        # CONDA_PREFIX 环境变量值
-
-  # 高频关节状态采集——占位至 Phase D 同步重构，当前不采集
+  # 高频关节状态采集 (Phase D 占位, 当前未接通)
   state_hifreq:
     enabled: false
-    rate: 240  # 目标采集频率 Hz; Phase D 接通时生效
+    rate: 240
+
+  # 控制器预检: 录制前幂等启动 joint impedance controller (防 polymetis 异步启失败)
+  controller_preflight:
+    enabled: true
+    polymetis_python: "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python"
+    polymetis_conda_prefix: "/home/ubuntu/Desktop/jhli/envs/polymetis-local"
 
   teleop:
     control_mode: *control_mode
-    dynamixel_config:
-      port: "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
-      # hardware_offsets: [0, 0, 0, 0, 0, 0, 0] # The Calibration offsets between the master and the slave robot
-      hardware_offsets: [-0.12183455210997171, -0.002845966063342931, -0.06250428305273764, -2.0498354593763044, 0.05259129256457092, 1.9984585428810417, -0.9046528345737315]
-      use_gripper: &use_gripper True # 已开: Bug2旋转+RouteB真机验通(2026-05-18)+控制柜重启后启用夹爪
-      joint_ids: [0, 1, 2, 3, 4, 5, 6]
-      # joint_offsets: [6.283, 3.142, 0.0, 4.712, 4.712, 6.283, 2.496] # franka hand offsets
-      joint_offsets: [6.283, 3.142, -6.283, 4.712, -1.571, 6.283, 3.0] # robotiq hand offsets
-      joint_signs: [1, 1, 1, 1, 1, -1, 1]
-      gripper_config: [7, 0.9664079, 1.9404857] # id, min, max
-    spacemouse_config:
-      channel_ids: [0, 1, 2, 3, 4, 5]
-      channel_signs: [-1, -1, 1, -1, -1, 1]
-      use_gripper: *use_gripper # whether the spacemouse robot can use gripper
-      pose_scaler: [0.01, 0.05] # scaler for spacemouse actions [position, attitude]
-    oculus_config:
-      ip: "192.168.110.62"  # Oculus Quest IP address
-      use_gripper: *use_gripper
-      pose_scaler: [3.0, 2.0]  # scaler for oculus actions [position, attitude]
-      channel_signs: [1, 1, 1, -1, -1, 1]  # signs for each axis [x, y, z, rx, ry, rz]
-      # channel_signs: [-1, -1, 1, 1, 1, 1] # mirror
     unityvr_config:
-      use_gripper: *use_gripper
-      # 全局[位置, 姿态]标量; 每轴微调用 pos/rot_axis_gain（勿同时大幅调两者避混淆）
+      use_gripper: &use_gripper True
+      # 全局[位置, 姿态]标量增益 (每轴微调用 pos/rot_axis_gain)
       pose_scaler: [3.0, 2.0]
-      channel_signs: [1, 1, 1, -1, -1, 1]  # [x,y,z,rx,ry,rz]
-      oc2base_path: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy"  # 整合后路径(验通固定映射实际所在; 与代码默认一致)
+      channel_signs: [1, 1, 1, -1, -1, 1]     # [x,y,z,rx,ry,rz] 各轴符号
+      oc2base_path: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy"
       robot_ip: "127.0.0.1"
       robot_port: 4242
-      # §11.3 位置每轴增益[x,y,z]; 叠加在 pose_scaler[0] 之上, 仅缩放灵敏度不改方向/手性(§10.2(0) 红线)
-      # 默认全1=等价历史 pose_scaler 行为; 用户反馈 Y好X/Z钝→调大 gx,gz（如 [2.0,1.0,2.0]）
+      # 位置每轴增益 [x,y,z]; 叠加在 pose_scaler[0] 上, 仅缩放灵敏度不改方向 (§10.2(0))
       pos_axis_gain: [1.0, 1.0, 1.0]
-      # §11.3 姿态每轴增益[rx,ry,rz]; 叠加在 pose_scaler[1] 之上, 不改方向/手性(§10.2(0) 红线)
-      # 默认全1=等价历史 pose_scaler 行为; 某轴旋转钝→调大对应增益
+      # 姿态每轴增益 [rx,ry,rz]; 叠加在 pose_scaler[1] 上, 不改方向
       rot_axis_gain: [2.0, 2.0, 2.0]
-    placo:
-      visualize_placo: False
-      placo_dt: 0.01
-      # Placo IK settings for oculus joint mode
-      enable_ik: False               # 是否启用 Placo IK 计算关节位置（run_policy 时可设为 False）
-      robot_ip: "127.0.0.1"    # Franka robot IP for reading current joint states
-      robot_port: 4242              # Franka zerorpc port
-      ik_urdf_path: "assets/franka_urdf/fr3v2_no_mesh.urdf"  # No-mesh URDF for IK solver, empty to disable
-      ik_iterations: 30              # IK 求解迭代次数，值越大精度越高但更慢（推荐 8~15）
-      # ── Placo IK 任务权重 ──────────────────────────────────────────────
-      # Placo 将 IK 分解为多个加权"soft"任务，求解器在每次迭代中按权重
-      # 优先满足高权重任务。FR3v2 是 7-DOF 冗余臂，需要在末端精度和
-      # 关节锚定之间取得平衡：
-      #   - pos_weight  较大 → 末端位置跟踪更准，但关节可能偏离当前构型
-      #   - joints_weight 较大 → 关节稳定，但末端可能跟不上（尤其前/后方向）
-      #   - ori_weight  控制姿态跟踪优先级
-      #   - regularization 防止求解器数值奇异，一般无需调整
-      ik_pos_weight: 8.0            # 末端位置跟踪权重（主要任务，建议 5~10）
-      ik_ori_weight: 3.0            # 末端姿态跟踪权重（建议 0.3~2.0）
-      ik_joints_weight: 0.2         # 关节锚定权重，解决 7-DOF 冗余（建议 0.1~1.0）
-      ik_regularization: 1.0e-4     # 正则化权重，防止数值奇异（一般不调）
+      # VR 食指扳机激活阈值 [0..1]; 高于此值开始发 delta_ee_pose
+      trigger_threshold: 0.85
+      # send_action EMA 平滑系数 (0..1); 越小越平滑, 越大越跟手
+      smoothing_alpha: 0.4
 
   robot:
-    # ip: &ip "172.16.0.2" # robot ip
-    ip: &ip "127.0.0.1" # NUC ip
+    ip: &ip "127.0.0.1"                       # zerorpc bridge IP (本机)
     use_gripper: *use_gripper
-    close_threshold: 0.7 # threshold to determine gripper open/close
-    gripper_bin_threshold: 0.98 # threshold to determine gripper is closed
-    # gripper_port: &gripper_port "/dev/franka_left_gripper" # gripper_port
-    gripper_reverse: false  # If gripper moves opposite, flip this value
-    gripper_max_open: 0.0801 # gripper max open width in meters 0.0801 for franka hand, 0.12 for robotiq gripper
-    # Execute mode for oculus control: "ee_pose" (cartesian impedance) or "joint" (joint impedance via Placo IK)
-    execute_mode: "ee_pose"
-
-  policy:
-    type: "act"  # 策略类型 (act, diffusion)
-    device: "cuda"  # 运行设备 (cuda, cpu)
-    push_to_hub: False  # 禁用模型推送
-    # pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/lihao-test-0310/diffusion_test1/checkpoints/last/pretrained_model"
-    pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/zhonghuai/lajiao_20260318_merged/act_test2/checkpoints/last/pretrained_model"
-    # pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/lihao-test/act_test3/checkpoints/020000/pretrained_model"
-    # 预训练模型路径下要包括config.json
+    close_threshold: 0.7                       # 夹爪判 open/close 阈值
+    gripper_bin_threshold: 0.98                # 判夹爪已闭合的阈值
+    gripper_reverse: false                     # 夹爪方向反转
+    gripper_max_open: 0.0801                   # 夹爪最大开度 (m); franka hand 0.0801
+    execute_mode: "ee_pose"                    # oculus 控制下的执行模式 (ee_pose / joint)
+    # HOME 关节位姿 (rad, 7 维); '回 Home' 按钮 + episode 间自动 reset 用
+    # 默认值是当前 Franka2 示教位姿, 换末端/工装重标后改这个数组
+    home_joint_position: [-0.032383, 0.309742, -0.028457, -1.616216, 0.001244, 1.563408, 0.832192]
 
   task:
-    # description: "Pick up the green cube and put it into the trash bin." # task description
-    description: "pick up the Shanghai Green and put them into the brown basket" # hdf5 入口现读此 cfg（CLI 仅覆盖）
-    # description: "pick up the red chili and put it into the brown basket"
-    num_episodes: 1  # M1 fix: UI 模式每次点开始录此数量条 ep (默认 1=保存后立即回 waiting); terminal 键盘模式 (run_record_hdf5.py) 可设更大批量
-    display: True # Whether to display the data during recording
-    resume: false # whether to resume from an existing dataset
-    resume_dataset: roboticiq/pick_all_yellow_cube_to_brown_basket_20260208_v01 # dataset to resume from if resume is True
+    description: "pick up the Shanghai Green and put them into the brown basket"
+    num_episodes: 1                            # UI 模式: 每次点开始录此数量条 (默认 1)
 
   time:
-    episode_time_sec: 6000 # 每 episode 最长时间（秒）; hdf5 入口现读此 cfg（CLI --episode-sec 仅临时覆盖）
-    reset_time_sec: 6000 # max time to reset between episodes in seconds
-    save_meta_period: 1 # Save metadata after every N episodes
+    episode_time_sec: 6000                     # 每 ep 最长时长 (秒)
+    reset_time_sec: 6000                       # 自动 reset 最长等待 (秒)
 
   cameras:
-    wrist_cam_serial: "419622073931" # 腕部相机序列号（手腕视角，跟随末端运动）; 参考: 243222071212 344322074412
-    exterior_cam_serial: "233622075512" # 外部相机序列号（全局视角，固定安装）; 参考: 243322071821 339322074423
-    width: 424 # 图像宽度（像素）; RealSense 支持 424/640
-    height: 240 # 图像高度（像素）; RealSense 支持 240/360
-
-  storage:
-    push_to_hub: False # whether to push the dataset to your huggingface repo after recording
-
-replay:
-  dataset_name: babycare/milk_power_20260321_v03
-  episode_idx: 0 # episode index to replay
-  robot:
-    ip: *ip
-    # gripper_port: *gripper_port
-  control_mode: *control_mode
-
-visualize:
-  dataset_name: babycare/milk_power_20260321_v03
-  episode_index: 0 # episode index to visualize
+    # 默认分辨率 640x480 (RealSense D435 支持模式; 见 https://intelrealsense.github.io/librealsense/doxygen/rs__sensor_8h.html)
+    # ⚠️ lerobot RealSenseCamera 内置语义: 若 rotate_deg=90/270, capture 会自动反转 (width=480/height=640),
+    # RealSense 不支持 480x640 模式 → "Couldn't resolve requests". rotate=90 时请改用 RealSense 支持的
+    # 反向模式 (如 1280x720 + rotate=90 ok; 但 640x480 + rotate=90 不支持).
+    width: 640                                 # 全局默认宽 (cam 硬件 capture 尺寸)
+    height: 480                                # 全局默认高
+    # 腕部相机 (跟随末端运动)
+    wrist:
+      serial: "419622073931"                  # 相机序列号
+      width: 640                               # 分辨率 width
+      height: 480                              # 分辨率 height
+      fps: 15                                  # 帧率 Hz (建议与 record.fps 同源)
+      rotate_deg: 0                            # 旋转角度 (0/90/180/270); 安装方向调整
+    # 外部相机 (全局视角, 固定安装)
+    exterior:
+      serial: "233622075512"
+      width: 640
+      height: 480
+      fps: 15
+      rotate_deg: 0
+    # 兼容旧字段 (旧代码读 wrist_cam_serial / exterior_cam_serial)
+    wrist_cam_serial: "419622073931"
+    exterior_cam_serial: "233622075512"

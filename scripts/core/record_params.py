@@ -23,11 +23,21 @@ def extract_joint_vel(obs, dof=7):
 
 
 def realsense_fps(fps):
-    """RealSense 相机帧率适配: pyrealsense2 enable_stream 要求 framerate 为 int,
-    而单一来源 fps 是 float(循环节拍 1.0/fps 与 hdf5 元数据需要)。在相机边界转 int。
-    RealSense 硬件仅支持整数帧率(15/30/60/90), 非整数 fps 本就非法。
+    """RealSense 相机帧率适配.
+
+    RealSense 硬件支持的整数帧率: 6/15/30/60/90 (D435 等). 用户 yaml record.fps
+    控制 record loop 节拍 (可以是 20/25 等任意 Hz), 但 cam stream 必须用支持值.
+    实现: 取 >= fps 的最小合法值 (cam 跑得比 loop 快, record loop 抽样最新帧).
+    例: fps=20 -> cam 30Hz; fps=10 -> cam 15Hz; fps=35 -> cam 60Hz.
     """
-    return int(round(float(fps)))
+    f = int(round(float(fps)))
+    valid = [6, 15, 30, 60, 90]
+    if f in valid:
+        return f
+    for v in valid:
+        if v >= f:
+            return v
+    return 90
 
 
 def parse_reset_config(rec_raw: dict):

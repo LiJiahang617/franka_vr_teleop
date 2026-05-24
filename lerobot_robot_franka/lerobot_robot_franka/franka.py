@@ -42,7 +42,8 @@ class Franka(Robot):
         self._last_gripper_position = 1
         
         # 动作平滑：指数移动平均 (EMA) 滤波器
-        self._smoothing_alpha = 0.4  # 平滑系数，越小越平滑 (0~1)，0.4 是较好的折中
+        # 平滑系数从 config 读 (默认 0.4, yaml record.robot.smoothing_alpha 可改)
+        self._smoothing_alpha = getattr(config, "smoothing_alpha", 0.4)
         self._smoothed_delta = None  # 上一次平滑后的 delta
 
         # VR enable 开关 (ros2_realman_ws 同款设计):
@@ -158,7 +159,7 @@ class Franka(Robot):
 
         # joint_positions = np.array([1.58472168, -1.56486702, -1.74356186, -2.634835, -0.11180906, 4.2022109, -1.51133597])
         print(f"\nMoving joint positions to: {HOME_JOINT_POSITION} ...\n")
-        self._robot.robot_move_to_joint_positions(positions = HOME_JOINT_POSITION, time_to_go=None)
+        self._robot.robot_move_to_joint_positions(positions = np.asarray(getattr(self.config, "home_joint_position", None) or HOME_JOINT_POSITION, dtype=np.float64), time_to_go=None)
         self._robot.gripper_goto(
             width=self.config.gripper_max_open,
             speed=self._gripper_speed,
@@ -290,7 +291,7 @@ class Franka(Robot):
                 #     force=self._gripper_force,
                 #     blocking=True
                 # )
-                self._robot.robot_move_to_joint_positions(positions = HOME_JOINT_POSITION, time_to_go=None)
+                self._robot.robot_move_to_joint_positions(positions = np.asarray(getattr(self.config, "home_joint_position", None) or HOME_JOINT_POSITION, dtype=np.float64), time_to_go=None)
                 self._robot.gripper_goto(
                     width=self.config.gripper_max_open,
                     speed=self._gripper_speed,

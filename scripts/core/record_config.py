@@ -93,12 +93,12 @@ class RecordConfig:
     """录制会话配置类（Route B 专用，仅支持 unityvr 控制模式）。"""
 
     def __init__(self, cfg: Dict[str, Any]):
-        storage = cfg["storage"]
+        storage = cfg.get("storage", {})    # 死字段, 兼容旧 yaml
         task = cfg["task"]
         time = cfg["time"]
         cam = cfg["cameras"]
         robot = cfg["robot"]
-        policy = cfg["policy"]
+        policy = cfg.get("policy")           # 死字段, run_policy 模式才用
         teleop = cfg["teleop"]
 
         # Global config
@@ -113,8 +113,9 @@ class RecordConfig:
         self.control_mode = teleop.get("control_mode", "unityvr")
         self._parse_teleop_config(teleop)
 
-        # Policy config（保留接口，Route B run_record_hdf5 不实际使用 policy 字段）
-        self._parse_policy_config(policy)
+        # Policy config (死字段, UI 录制不读; 仅在 yaml 提供时解析向后兼容)
+        if policy is not None:
+            self._parse_policy_config(policy)
 
         # Robot config
         self.robot_ip: str = robot["ip"]
@@ -124,6 +125,13 @@ class RecordConfig:
         self.gripper_bin_threshold: float = robot["gripper_bin_threshold"]
         self.gripper_max_open: float = robot.get("gripper_max_open", 0.08)
         self.execute_mode: str = robot.get("execute_mode", "ee_pose")  # "ee_pose" or "joint"
+        # HOME 关节位姿 (rad, 7 维): "回 Home" 按钮 + ep 间自动 reset 用; 默认 = 现 Franka2 示教位
+        _home = robot.get("home_joint_position")
+        if _home is None:
+            _home = [-0.032383, 0.309742, -0.028457, -1.616216, 0.001244, 1.563408, 0.832192]
+        if len(_home) != 7:
+            raise ValueError(f"robot.home_joint_position 必须 7 维, 实得 {len(_home)}")
+        self.home_joint_position = list(map(float, _home))
 
         # Task config
         self.num_episodes: int = task.get("num_episodes", 1)
@@ -140,11 +148,23 @@ class RecordConfig:
         # TODO(Phase 后续/统一入口时): 修正拼写为 save_meta_period 并改 yaml
         self.save_mera_period: int = time.get("save_mera_period", 1)
 
-        # Cameras config
-        self.wrist_cam_serial: str = cam["wrist_cam_serial"]
-        self.exterior_cam_serial: str = cam["exterior_cam_serial"]
-        self.width: int = cam["width"]
-        self.height: int = cam["height"]
+        # Cameras config (新结构: wrist/exterior 子段; 旧字段 wrist_cam_serial 仍兼容)
+        self.width: int = int(cam.get("width", 640))
+        self.height: int = int(cam.get("height", 480))
+        # 腕部相机 - 新结构优先, fallback 旧字段
+        wrist_cfg = cam.get("wrist", {}) or {}
+        self.wrist_cam_serial: str = str(wrist_cfg.get("serial") or cam.get("wrist_cam_serial"))
+        self.wrist_width: int = int(wrist_cfg.get("width", self.width))
+        self.wrist_height: int = int(wrist_cfg.get("height", self.height))
+        self.wrist_fps: int = int(wrist_cfg.get("fps", int(self.fps) if hasattr(self, 'fps') else 20))
+        self.wrist_rotate_deg: int = int(wrist_cfg.get("rotate_deg", 0))
+        # 外部相机
+        ext_cfg = cam.get("exterior", {}) or {}
+        self.exterior_cam_serial: str = str(ext_cfg.get("serial") or cam.get("exterior_cam_serial"))
+        self.exterior_width: int = int(ext_cfg.get("width", self.width))
+        self.exterior_height: int = int(ext_cfg.get("height", self.height))
+        self.exterior_fps: int = int(ext_cfg.get("fps", int(self.fps) if hasattr(self, 'fps') else 20))
+        self.exterior_rotate_deg: int = int(ext_cfg.get("rotate_deg", 0))
 
         # Storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
@@ -188,6 +208,9 @@ class RecordConfig:
             "/home/ubuntu/Desktop/jhli/envs/polymetis-local"
         )
 
+        # AsyncEpisodeSaver 队列深度 (UI 模式 _wrapped_run_episodes 用)
+        self.async_saver_maxsize: int = int(cfg.get("async_saver_maxsize", 5))
+
         # Phase E Task 6: Web UI 配置段（严格解析，缺省全默认，向后兼容旧 yaml 无 ui 段）
         self.ui_config = _parse_ui_config(cfg.get("ui"))
 
@@ -212,6 +235,9 @@ class RecordConfig:
                 uvr_cfg.get("rot_axis_gain"),
                 key_name="record.teleop.unityvr_config.rot_axis_gain",
             )
+            # VR 食指扳机激活阈值 + send_action EMA 平滑系数 (yaml 新增, 默认保历史值)
+            self.trigger_threshold: float = float(uvr_cfg.get("trigger_threshold", 0.85))
+            self.smoothing_alpha: float = float(uvr_cfg.get("smoothing_alpha", 0.4))
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}（仅支持 unityvr）")
 
@@ -248,6 +274,8 @@ class RecordConfig:
                 robot_port=self.unityvr_robot_port,
                 pos_axis_gain=self.pos_axis_gain,
                 rot_axis_gain=self.rot_axis_gain,
+                trigger_threshold=self.trigger_threshold,
+                smoothing_alpha=self.smoothing_alpha,
             )
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}")

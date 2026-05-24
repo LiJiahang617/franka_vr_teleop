@@ -26,3 +26,7 @@ class UnityVRTeleopConfig(BaseTeleopConfig):
     # 仅在已验通映射方向输出后逐轴缩放，不改 _POS_MAP/R_cal 方向/手性（§10.2(0) 红线）
     pos_axis_gain: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])  # [gx, gy, gz]
     rot_axis_gain: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])  # [grx, gry, grz]
+    # VR 食指扳机激活阈值 [0..1] (高于此值开始发 delta_ee_pose)
+    trigger_threshold: float = 0.85
+    # send_action EMA 平滑系数 (0..1); 越小越平滑, 越大越跟手
+    smoothing_alpha: float = 0.4

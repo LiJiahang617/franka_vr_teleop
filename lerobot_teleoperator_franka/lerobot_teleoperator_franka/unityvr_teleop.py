@@ -42,6 +42,7 @@ class UnityVRTeleop(BaseTeleop):
             robot_port=self.cfg.robot_port,
             pos_axis_gain=self.cfg.pos_axis_gain,   # §11.3 per-axis 位置增益透传
             rot_axis_gain=self.cfg.rot_axis_gain,   # §11.3 per-axis 旋转增益透传
+            trigger_threshold=self.cfg.trigger_threshold,   # VR 扳机阈值透传
         )
         logger.info("[TELEOP] UnityVR connected (world-frame, head-independent)")
 

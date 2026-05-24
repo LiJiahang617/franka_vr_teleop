@@ -82,28 +82,38 @@ def build_robot_and_teleop(record_cfg, fps: float):
     from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
     from lerobot_teleoperator_franka import create_teleop
 
-    # 相机配置（与 run_record.py 完全一致）
+    # 相机配置 (yaml.cameras.wrist/exterior 独立子段, 各自 width/height/fps/rotate_deg)
+    def _rotate_deg_to_enum(deg):
+        m = {0: Cv2Rotation.NO_ROTATION, 90: Cv2Rotation.ROTATE_90,
+             180: Cv2Rotation.ROTATE_180, 270: Cv2Rotation.ROTATE_270, -90: Cv2Rotation.ROTATE_270}
+        if int(deg) not in m:
+            raise ValueError(f"rotate_deg 必须为 0/90/180/270, 实得 {deg}")
+        return m[int(deg)]
+
     wrist_image_cfg = RealSenseCameraConfig(
         serial_number_or_name=record_cfg.wrist_cam_serial,
-        fps=realsense_fps(fps),
-        width=record_cfg.width,
-        height=record_cfg.height,
+        fps=realsense_fps(getattr(record_cfg, "wrist_fps", fps)),
+        width=getattr(record_cfg, "wrist_width", record_cfg.width),
+        height=getattr(record_cfg, "wrist_height", record_cfg.height),
         color_mode=ColorMode.RGB,
         use_depth=False,
-        rotation=Cv2Rotation.NO_ROTATION,
+        rotation=_rotate_deg_to_enum(getattr(record_cfg, "wrist_rotate_deg", 0)),
     )
     exterior_image_cfg = RealSenseCameraConfig(
         serial_number_or_name=record_cfg.exterior_cam_serial,
-        fps=realsense_fps(fps),
-        width=record_cfg.width,
-        height=record_cfg.height,
+        fps=realsense_fps(getattr(record_cfg, "exterior_fps", fps)),
+        width=getattr(record_cfg, "exterior_width", record_cfg.width),
+        height=getattr(record_cfg, "exterior_height", record_cfg.height),
         color_mode=ColorMode.RGB,
         use_depth=False,
-        rotation=Cv2Rotation.NO_ROTATION,
+        rotation=_rotate_deg_to_enum(getattr(record_cfg, "exterior_rotate_deg", 0)),
     )
     camera_config = {"wrist_image": wrist_image_cfg, "exterior_image": exterior_image_cfg}
 
     # 机器人配置（与 run_record.py 完全一致）
+    # smoothing_alpha: robot 段优先, 否则用 teleop 段 (兼容); 都没就用 dataclass 默认 0.4
+    _smoothing = (getattr(record_cfg, "robot_smoothing_alpha", 0.0) or
+                  getattr(record_cfg, "smoothing_alpha", 0.4))
     robot_config = FrankaConfig(
         robot_ip=record_cfg.robot_ip,
         cameras=camera_config,
@@ -115,6 +125,8 @@ def build_robot_and_teleop(record_cfg, fps: float):
         gripper_max_open=record_cfg.gripper_max_open,
         control_mode=record_cfg.control_mode,
         execute_mode=record_cfg.execute_mode,
+        home_joint_position=record_cfg.home_joint_position,
+        smoothing_alpha=float(_smoothing),
     )
     robot = Franka(robot_config)
 

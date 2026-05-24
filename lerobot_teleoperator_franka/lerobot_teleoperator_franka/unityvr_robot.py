@@ -17,7 +17,8 @@ class UnityVRRobot:
     def __init__(self, oc2base_path="/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy",
                  pose_scaler=(1.0, 1.0), channel_signs=(1, 1, 1, 1, 1, 1),
                  use_gripper=True, robot_ip="127.0.0.1", robot_port=4242,
-                 pos_axis_gain=(1., 1., 1.), rot_axis_gain=(1., 1., 1.)):
+                 pos_axis_gain=(1., 1., 1.), rot_axis_gain=(1., 1., 1.),
+                 trigger_threshold=0.85):
         """初始化 UnityVRRobot。
 
         Args:
@@ -43,6 +44,7 @@ class UnityVRRobot:
         self._channel_signs = list(channel_signs)
         self._pos_axis_gain = list(pos_axis_gain)    # §11.3 per-axis 位置增益
         self._rot_axis_gain = list(rot_axis_gain)    # §11.3 per-axis 旋转增益
+        self._trigger_threshold = float(trigger_threshold)  # VR 食指扳机激活阈值 [0..1]
         self._use_gripper = use_gripper
         self._prev_T = None
         self._gripper_closed = False
@@ -64,7 +66,7 @@ class UnityVRRobot:
     def get_observations(self):
         """返回 dict，键与 UnityVRTeleop.action_features 完全一致。"""
         transforms, buttons = self._reader.get_transformations_and_buttons()
-        enabled = _m.is_enabled(buttons)
+        enabled = _m.is_enabled(buttons, th=self._trigger_threshold)
         delta = np.zeros(6)
         if enabled and ("r" in transforms):
             cur_T = transforms["r"]

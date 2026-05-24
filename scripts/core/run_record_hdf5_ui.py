@@ -278,7 +278,7 @@ def main():
         if not reset_between_episodes:
             kwargs["reset_fn"] = None  # 仅切断 run_episodes 的自动 reset
 
-        with AsyncEpisodeSaver(sink=_sink, maxsize=5) as saver_real:
+        with AsyncEpisodeSaver(sink=_sink, maxsize=getattr(record_cfg, "async_saver_maxsize", 5)) as saver_real:
             _saver_holder["s"] = saver_real
             # patch submit: 入队时 log "入队保存中" + 更新 pending
             _orig_submit = saver_real.submit
@@ -349,7 +349,7 @@ def main():
         # H4 fix: prepare 现 fail-loud，IllegalTransition 直接抛到此处由 finally 兜底
         controller.prepare()
         # preview sampler 用 daemon thread read cam（不调 zerorpc，OK）
-        controller.start_preview_sampler(robot.cameras)
+        controller.start_preview_sampler(robot.cameras, fps=float(fps))
         # 主线程阻塞消费命令队列 — 所有 zerorpc 调用主线程发生，绕开 gevent thread-affinity
         controller.consume_commands_blocking()
     except KeyboardInterrupt:
