@@ -2,7 +2,7 @@
 # 关键字段都在 record.* 下, 直接改这里, 重启 UI 生效.
 
 record:
-  repo_id: "local/franka_dataset"             # 数据集名称 (hf 风格, 仅 lerobot 转换器读)
+  repo_id: "local/franka_dataset"             # 数据集名称 (HF Hub 风格, 用户改自己的 huggingface hub repo_id, 如 yourname/your_dataset)
   debug: 0                                     # 调试模式 (0=真机)
   user_notes:                                  # 数采备注 (写 hdf5)
   fps: 15                                      # 录制帧率单一来源 (Hz); 相机/循环/写盘同源
@@ -73,7 +73,7 @@ record:
     home_joint_position: [-0.032383, 0.309742, -0.028457, -1.616216, 0.001244, 1.563408, 0.832192]
 
   task:
-    description: "pick up the Shanghai Green and put them into the brown basket"
+    description: "pick up the object and place it in the target zone"  # 改成自己的任务描述, 例: "pick up the Shanghai Green and put them into the brown basket"
     num_episodes: 1                            # UI 模式: 每次点开始录此数量条 (默认 1)
 
   time:

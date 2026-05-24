@@ -21,7 +21,7 @@ dist/
 .vscode/
 .idea/
 
-# === 数采项目补充(Route B 整合) ===
+# === 通用日志 / 备份 / 数据缓存 ===
 *.log
 *.bak
 *.bak.*
@@ -29,10 +29,24 @@ dist/
 *.npz
 *.csv
 _*.log
-.stage3_oc2arm_R.*.bak-*
+
+# === 私有标定数据 (用户本机生成, 不入库) ===
+.stage3_*.npy
+.stage3_*.json
+.stage3_*.meta.json
+_payload_ident_v2_out_*.npz
+
+# === 数采产物 ===
 _hdf5_episodes/
 _lerobot_out/
 _stage3_*
-# 跟踪固定映射本体, 仅忽略其 .bak 备份
-!.stage3_oc2arm_R.npy
-!.stage3_oc2arm_R.meta.json
+recordings/*.h5
+recordings/**/*.h5
+tmp/
+
+# === 可视化输出 ===
+*.rrd
+
+# === 运行时服务日志 ===
+_polymetis_*.log
+_gripper_*.log
