@@ -19,7 +19,7 @@
 
 ```bash
 cd ~
-git clone https://github.com/<your-fork>/fairo-franka.git
+git clone https://github.com/LiJiahang617/fairo-franka.git
 cd fairo-franka/polymetis/polymetis
 ```
 

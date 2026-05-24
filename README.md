@@ -129,6 +129,7 @@ franka_vr_teleop/
 │   └── utils/                       # 辅助工具
 ├── docs/
 │   ├── QUICKSTART.md                # 5 分钟从 0 到第一条录制
+│   ├── DATA_PIPELINE.md             # 数据格式转换 (LeRobot v2.1/v3.0) + rerun 可视化
 │   ├── architecture.md              # 系统架构与原理
 │   ├── data-format.md               # franka-hdf5-v2 schema + LeRobot 转换
 │   ├── development-guide.md         # 开发说明 / 测试 / 扩展规范
@@ -163,6 +164,9 @@ python scripts/tools/hdf5_to_lerobot_v21.py \
 ```
 
 更详细的步骤、参数说明、故障排除见 [docs/QUICKSTART.md](docs/QUICKSTART.md)。
+
+录制完成后, 数据格式转换 (LeRobot v2.1/v3.0) 与 rerun 可视化见
+[docs/DATA_PIPELINE.md](docs/DATA_PIPELINE.md)。
 
 ---
 

@@ -137,20 +137,25 @@ def visualize_dataset(
 def main():
     parent_path = Path(__file__).resolve().parent
     cfg_path = parent_path.parent / "config" / "record_cfg_unityvr.yaml"
-    with open(cfg_path, 'r') as f:
-        cfg = yaml.safe_load(f)
+    # yaml.visualize 段已废 (开源时删), 仅作 fallback 兼容; 推荐用 CLI --repo-id/--episode-index
+    try:
+        with open(cfg_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+        _viz = cfg.get("visualize", {}) if isinstance(cfg, dict) else {}
+    except Exception:
+        _viz = {}
 
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
         "--repo-id",
         type=str,
-        default=cfg["visualize"]["dataset_name"],
+        default=_viz.get("dataset_name", "local/franka_dataset"),
     )
     parser.add_argument(
         "--episode-index",
         type=int,
-        default=cfg["visualize"]["episode_index"],
+        default=_viz.get("episode_index", 0),
         help="Episode to visualize.",
     )
     parser.add_argument(
