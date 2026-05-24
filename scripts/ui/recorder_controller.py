@@ -574,6 +574,20 @@ class RecorderController:
         next_ep = self._ep_count
         self._log(f"[REC] 开始录制 episode #{next_ep}")
 
+        # Stale controller fix (2026-05-24): polymetis joint impedance stale timeout
+        # 实测仅 ~1 秒, 用户点 vr_enable 后停顿几秒再点 start 就已 terminate.
+        # 这里在 run_fn 启动前再次调 enable_arm_control 幂等重启 controller, 保证
+        # record_episode 第一次 send_action (warmup 0.5s + 第一个 iter) 之前 controller fresh.
+        # 只有 vr_control_enabled=True 时才重启 (vr disabled 不需要 arm 控制).
+        rbt = (self._record_args or {}).get("robot")
+        if rbt is not None and hasattr(rbt, "is_arm_control_enabled") and rbt.is_arm_control_enabled():
+            if hasattr(rbt, "enable_arm_control"):
+                ok_restart = rbt.enable_arm_control()
+                if ok_restart:
+                    self._log("[REC] 自动重启 joint impedance controller (stale 防御)")
+                else:
+                    self._log("[REC] 警告: controller 重启失败, send_action 可能报 no controller running")
+
         # 录制前完全停 preview sampler 并等其退出，让 cam pipeline 释放
         self.stop_preview_sampler(timeout=2.0)
 
