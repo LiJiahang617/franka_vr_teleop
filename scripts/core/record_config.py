@@ -93,12 +93,10 @@ class RecordConfig:
     """录制会话配置类（Route B 专用，仅支持 unityvr 控制模式）。"""
 
     def __init__(self, cfg: Dict[str, Any]):
-        storage = cfg.get("storage", {})    # 死字段, 兼容旧 yaml
         task = cfg["task"]
         time = cfg["time"]
         cam = cfg["cameras"]
         robot = cfg["robot"]
-        policy = cfg.get("policy")           # 死字段, run_policy 模式才用
         teleop = cfg["teleop"]
 
         # Global config
@@ -106,16 +104,11 @@ class RecordConfig:
         self.debug: bool = cfg.get("debug", True)
         self.fps: str = cfg.get("fps", 15)
         self.user_info: str = cfg.get("user_notes", None)
-        self.run_mode: str = cfg.get("run_mode", "run_record")
         self.rename_map: dict[str, str] = field(default_factory=dict)
 
         # Teleop config - 仅支持 unityvr
         self.control_mode = teleop.get("control_mode", "unityvr")
         self._parse_teleop_config(teleop)
-
-        # Policy config (死字段, UI 录制不读; 仅在 yaml 提供时解析向后兼容)
-        if policy is not None:
-            self._parse_policy_config(policy)
 
         # Robot config
         self.robot_ip: str = robot["ip"]
@@ -135,18 +128,10 @@ class RecordConfig:
 
         # Task config
         self.num_episodes: int = task.get("num_episodes", 1)
-        self.display: bool = task.get("display", True)
         self.task_description: str = task.get("description", "default task")
-        self.resume: bool = task.get("resume", False)
-        self.resume_dataset: str = task.get("resume_dataset", "")
 
         # Time config
         self.episode_time_sec: int = time.get("episode_time_sec", 60)
-        self.reset_time_sec: int = time.get("reset_time_sec", 10)
-        # 注意：yaml 实际键为 save_meta_period，此处 save_mera_period 为既有拼写 bug，
-        # Phase C 不修（修改会破坏 run_record.py 另一入口行为 = 违反向后兼容红线）
-        # TODO(Phase 后续/统一入口时): 修正拼写为 save_meta_period 并改 yaml
-        self.save_mera_period: int = time.get("save_mera_period", 1)
 
         # Cameras config (新结构: wrist/exterior 子段; 旧字段 wrist_cam_serial 仍兼容)
         self.width: int = int(cam.get("width", 640))
@@ -166,8 +151,6 @@ class RecordConfig:
         self.exterior_fps: int = int(ext_cfg.get("fps", int(self.fps) if hasattr(self, 'fps') else 20))
         self.exterior_rotate_deg: int = int(ext_cfg.get("rotate_deg", 0))
 
-        # Storage config
-        self.push_to_hub: bool = storage.get("push_to_hub", False)
 
         # Phase C 扩展字段（严格解析, 全 fail-loud, 守 Phase B-T5 真机配置鲁棒 ethos）
         self.out_dir = cfg.get("out_dir", None)  # None=下游(Task4 resolve_record_overrides)
@@ -241,26 +224,6 @@ class RecordConfig:
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}（仅支持 unityvr）")
 
-    def _parse_policy_config(self, policy: Dict[str, Any]) -> None:
-        """解析 policy 配置（保留接口，Route B 录制不实际使用 policy 执行）。"""
-        policy_type = policy["type"]
-        if policy_type == "act":
-            from lerobot.policies import ACTConfig
-            self.policy = ACTConfig(
-                device=policy["device"],
-                push_to_hub=policy["push_to_hub"],
-            )
-        elif policy_type == "diffusion":
-            from lerobot.policies import DiffusionConfig
-            self.policy = DiffusionConfig(
-                device=policy["device"],
-                push_to_hub=policy["push_to_hub"],
-            )
-        else:
-            raise ValueError(f"No config for policy type: {policy_type}")
-
-        if policy.get("pretrained_path"):
-            self.policy.pretrained_path = policy["pretrained_path"]
 
     def create_teleop_config(self):
         """创建遥操配置对象（仅 unityvr）。"""
