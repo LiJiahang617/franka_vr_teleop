@@ -14,7 +14,7 @@ Task 6 适配（schema v2 + 14D realman 布局）：
   - hdf5 的 action/delta_ee_pose 不使用
 
 用法:
-  envs/franka-teleop/bin/python lerobot_franka_teleop/scripts/tools/hdf5_to_lerobot.py \\
+  envs/franka-teleop/bin/python franka_vr_teleop/scripts/tools/hdf5_to_lerobot.py \\
       --in _hdf5_episodes --repo-id local/franka_x --fps 30
 
 注：lerobot hw_to_dataset_features 将 float 键聚合为向量，图像键加前缀

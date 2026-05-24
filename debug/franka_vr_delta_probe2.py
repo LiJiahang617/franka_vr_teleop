@@ -6,9 +6,9 @@ import sys, time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-_JHLI = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_JHLI = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 sys.path.insert(0, _JHLI)
-sys.path.insert(0, f"{_JHLI}/lerobot_franka_teleop/lerobot_teleoperator_franka")
+sys.path.insert(0, f"{_JHLI}/franka_vr_teleop/lerobot_teleoperator_franka")
 import vr_align
 from unity_vr_reader import UnityVRReader
 from lerobot_teleoperator_franka import unityvr_mapping as m

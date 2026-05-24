@@ -10,7 +10,7 @@ slope 不需要 ≈ 1.0：
 
 用法：
     /home/ubuntu/Desktop/jhli/envs/franka-teleop/bin/python \\
-        /home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts/spike/spike_gripper_hw_timestamp.py
+        /home/ubuntu/Desktop/jhli/franka_vr_teleop/scripts/spike/spike_gripper_hw_timestamp.py
 """
 import time
 import numpy as np

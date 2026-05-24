@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 # ---- 模块路径常量 ----
-_REPO = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_REPO = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 _PKG = f"{_REPO}/lerobot_teleoperator_franka/lerobot_teleoperator_franka"
 
 

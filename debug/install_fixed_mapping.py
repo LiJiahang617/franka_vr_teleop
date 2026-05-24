@@ -45,7 +45,7 @@ print(R_fixed)
 # 3) 经 vr_align 真实加载校验 + compute_delta_action 离线一致性 sanity
 import sys
 sys.path.insert(0, JHLI)
-sys.path.insert(0, f"{JHLI}/lerobot_franka_teleop/lerobot_teleoperator_franka")
+sys.path.insert(0, f"{JHLI}/franka_vr_teleop/lerobot_teleoperator_franka")
 import vr_align
 from scipy.spatial.transform import Rotation
 from lerobot_teleoperator_franka import unityvr_mapping as m

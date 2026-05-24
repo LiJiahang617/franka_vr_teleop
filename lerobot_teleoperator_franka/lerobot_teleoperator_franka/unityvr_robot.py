@@ -14,7 +14,7 @@ DOF = 7
 
 
 class UnityVRRobot:
-    def __init__(self, oc2base_path="/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy",
+    def __init__(self, oc2base_path="/home/ubuntu/Desktop/jhli/franka_vr_teleop/.stage3_oc2arm_R.npy",
                  pose_scaler=(1.0, 1.0), channel_signs=(1, 1, 1, 1, 1, 1),
                  use_gripper=True, robot_ip="127.0.0.1", robot_port=4242,
                  pos_axis_gain=(1., 1., 1.), rot_axis_gain=(1., 1., 1.),

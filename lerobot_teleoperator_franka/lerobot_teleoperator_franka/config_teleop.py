@@ -19,7 +19,7 @@ class UnityVRTeleopConfig(BaseTeleopConfig):
     control_mode: str = "unityvr"
     pose_scaler: List[float] = field(default_factory=lambda: [1.0, 1.0])
     channel_signs: List[int] = field(default_factory=lambda: [1, 1, 1, 1, 1, 1])
-    oc2base_path: str = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy"
+    oc2base_path: str = "/home/ubuntu/Desktop/jhli/franka_vr_teleop/.stage3_oc2arm_R.npy"
     robot_ip: str = "127.0.0.1"
     robot_port: int = 4242
     # §11.3 每轴运动灵敏度（默认全1=等价历史 pose_scaler 两标量行为，无新键时零改动）

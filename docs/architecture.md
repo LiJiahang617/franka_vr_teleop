@@ -18,7 +18,7 @@
 
 ## 1. 系统概述
 
-本仓库（`lerobot_franka_teleop`）是 Franka Research 3 机械臂的**遥操作数据采集系统**。当前主线为 **Route B**：
+本仓库（`franka_vr_teleop`）是 Franka Research 3 机械臂的**遥操作数据采集系统**。当前主线为 **Route B**：
 
 > **Route B = Quest VR 世界系遥操 Franka → 录制 `franka-hdf5-v2` → 转 LeRobot 数据集**
 
@@ -39,7 +39,7 @@
 ## 2. 仓库目录结构
 
 ```
-lerobot_franka_teleop/
+franka_vr_teleop/
 ├── franka_hdf5_schema.py          # franka-hdf5-v2 schema 契约 + validate_episode（仓库根 loose 模块）
 ├── setup.py                       # 主包安装 + console_scripts 入口
 ├── NOTICE.md                      # 第三方代码出处声明
@@ -79,7 +79,7 @@ lerobot_franka_teleop/
 └── assets/                        # 图片（说明文档用图）
 ```
 
-> 三个 Python 包：主包 `lerobot_franka_teleop`（含 `scripts/`），子包 `lerobot_robot_franka`、`lerobot_teleoperator_franka`。三者均以 editable 方式安装在 venv `envs/franka-teleop` 中。
+> 三个 Python 包：主包 `franka_vr_teleop`（含 `scripts/`），子包 `lerobot_robot_franka`、`lerobot_teleoperator_franka`。三者均以 editable 方式安装在 venv `envs/franka-teleop` 中。
 
 ---
 

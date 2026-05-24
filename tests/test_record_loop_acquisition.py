@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 
-_P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 _s = importlib.util.spec_from_file_location(
     "rrh", os.path.join(_P, "scripts/core/run_record_hdf5.py")
 )

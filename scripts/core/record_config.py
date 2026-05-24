@@ -205,7 +205,7 @@ class RecordConfig:
             self.pose_scaler = uvr_cfg.get("pose_scaler", [1.0, 1.0])
             self.channel_signs = uvr_cfg.get("channel_signs", [1, 1, 1, 1, 1, 1])
             self.oc2base_path = uvr_cfg.get("oc2base_path",
-                "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy")
+                "/home/ubuntu/Desktop/jhli/franka_vr_teleop/.stage3_oc2arm_R.npy")
             self.unityvr_robot_ip = uvr_cfg.get("robot_ip", "127.0.0.1")
             self.unityvr_robot_port = uvr_cfg.get("robot_port", 4242)
             # §11.3 每轴增益（严格解析: len==3+finite+numeric, config-load 时 fail-loud;

@@ -1,6 +1,6 @@
 import sys, numpy as np, h5py, pytest
 sys.path.insert(0, "/home/ubuntu/Desktop/jhli")
-sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts")
+sys.path.insert(0, "/home/ubuntu/Desktop/jhli/franka_vr_teleop/scripts")
 import franka_hdf5_schema as S
 from core.hdf5_writer import HDF5EpisodeWriter
 

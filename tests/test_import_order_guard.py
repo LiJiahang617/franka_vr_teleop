@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 
-REPO = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+REPO = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 
 
 def _probe(code):
@@ -60,15 +60,15 @@ def test_vr_modules_importable_from_teleop_package():
 
 def test_run_record_hdf5_no_repo_root_syspath():
     # §11.1 不变量哨兵: run_record_hdf5.py 任何 sys.path.insert/append 都不得
-    # 把 repo 根(.../lerobot_franka_teleop 本身)塞进去——只允许其下子目录(scripts)。
+    # 把 repo 根(.../franka_vr_teleop 本身)塞进去——只允许其下子目录(scripts)。
     # 语义扫描: 用两个独立 re.search 覆盖行内/行尾两种结束形式,
     # 避免在字符类 [...] 中混用 ] 引发 re.error。
     import re
     src = open(f"{REPO}/scripts/core/run_record_hdf5.py").read()
     calls = re.findall(r"sys\.path\.(?:insert|append)\([^)]*\)", src, re.S)
     for c in calls:
-        # 违规模式: lerobot_franka_teleop 后跟引号且闭括号(路径止步于 repo 根)
-        bad = re.search(r"""lerobot_franka_teleop['")]\s*\)""", c) or               re.search(r"""lerobot_franka_teleop['")]\s*,?\s*$""", c, re.M)
+        # 违规模式: franka_vr_teleop 后跟引号且闭括号(路径止步于 repo 根)
+        bad = re.search(r"""franka_vr_teleop['")]\s*\)""", c) or               re.search(r"""franka_vr_teleop['")]\s*,?\s*$""", c, re.M)
         assert not bad, f"run_record_hdf5 仍把 repo 根塞 sys.path: {c!r}"
     # Task3 期 pre-import 守卫块(注释锚 + 锁包 import)须已随根因消失删净
     assert "解析两个 editable 安装的包并锁进 sys.modules" not in src, \

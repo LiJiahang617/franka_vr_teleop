@@ -4,7 +4,7 @@ import importlib.util, sys
 
 # 直接加载模块文件，避免触发 __init__.py（后者依赖 lerobot 包未装）
 _MAPPING_FILE = (
-    "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
     "/lerobot_teleoperator_franka/lerobot_teleoperator_franka/unityvr_mapping.py"
 )
 spec = importlib.util.spec_from_file_location("unityvr_mapping", _MAPPING_FILE)
@@ -75,10 +75,10 @@ def test_rotation_is_change_of_basis_of_controller_increment():
     import importlib.util, numpy as np
     from scipy.spatial.transform import Rotation
     _s = importlib.util.spec_from_file_location(
-        "_uvr", "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/lerobot_teleoperator_franka/lerobot_teleoperator_franka/unity_vr_reader.py")
+        "_uvr", "/home/ubuntu/Desktop/jhli/franka_vr_teleop/lerobot_teleoperator_franka/lerobot_teleoperator_franka/unity_vr_reader.py")
     _uvr = importlib.util.module_from_spec(_s); _s.loader.exec_module(_uvr)
     _sm = importlib.util.spec_from_file_location(
-        "_uvm", "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/"
+        "_uvm", "/home/ubuntu/Desktop/jhli/franka_vr_teleop/"
         "lerobot_teleoperator_franka/lerobot_teleoperator_franka/unityvr_mapping.py")
     _uvm = importlib.util.module_from_spec(_sm); _sm.loader.exec_module(_uvm)
 
@@ -108,7 +108,7 @@ def test_position_matches_verified_RIGHT_POSITION_MATRIX():
     与本会话用户实测"位置 x,y 反"反推一致(双重印证)。"""
     import importlib.util, numpy as np
     _s = importlib.util.spec_from_file_location(
-        "_uvr", "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/lerobot_teleoperator_franka/lerobot_teleoperator_franka/unity_vr_reader.py")
+        "_uvr", "/home/ubuntu/Desktop/jhli/franka_vr_teleop/lerobot_teleoperator_franka/lerobot_teleoperator_franka/unity_vr_reader.py")
     _uvr = importlib.util.module_from_spec(_s); _s.loader.exec_module(_uvr)
     Pv = np.array([[0, 0, 1], [-1, 0, 0], [0, 1, 0]], float)  # 验证参考
 

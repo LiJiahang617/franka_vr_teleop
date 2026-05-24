@@ -1,5 +1,5 @@
 [project]
-name = "lerobot-franka-teleop"
+name = "franka-vr-teleop"
 version = "0.1.0"
 description = "Franka VR Teleoperation & Data Collection"
 requires-python = ">=3.10"
@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jhli/lerobot_franka_teleop"
+Homepage = "https://github.com/jhli/franka_vr_teleop"
 
 # 说明:
 #   实际依赖列表见 requirements.txt (开源用户用 setup.sh 安装)

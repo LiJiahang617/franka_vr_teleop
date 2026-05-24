@@ -7,6 +7,6 @@ cd /home/ubuntu/Desktop/jhli || exit 2
 pkill -9 -f 'launch_gripper\.py|franka_hand_client' 2>/dev/null
 sleep 1
 : > _gripper_live.log
-setsid bash /home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts/services/_run_gripper.sh </dev/null >_gripper_live.log 2>&1 &
+setsid bash /home/ubuntu/Desktop/jhli/franka_vr_teleop/scripts/services/_run_gripper.sh </dev/null >_gripper_live.log 2>&1 &
 disown
 echo "GRIPPER_LAUNCHED pid=$! log=/home/ubuntu/Desktop/jhli/_gripper_live.log"

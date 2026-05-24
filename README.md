@@ -2,7 +2,7 @@
 
 Quest VR 世界系遥操 Franka Research 3 机械臂的数据采集系统，自动录制为自定义 `franka-hdf5-v2` 中间格式，再转 LeRobot **v3.0 / v2.1** 数据集用于训练与可视化。
 
-衍生自 [Shenzhaolong1330/lerobot_franka_teleop](https://github.com/Shenzhaolong1330/lerobot_franka_teleop)，重写为 **Route B 世界系遥操**方案：控制器位姿在 Unity 世界系下解算，与头显朝向解耦。
+衍生自 [Shenzhaolong1330/franka_vr_teleop](https://github.com/Shenzhaolong1330/franka_vr_teleop)，重写为 **Route B 世界系遥操**方案：控制器位姿在 Unity 世界系下解算，与头显朝向解耦。
 
 ---
 
@@ -103,7 +103,7 @@ python scripts/core/run_record_hdf5_ui.py --config my_cfg.yaml
 ## Project Structure
 
 ```
-lerobot_franka_teleop/
+franka_vr_teleop/
 ├── franka_hdf5_schema.py            # franka-hdf5-v2 schema + validate_episode
 ├── lerobot_robot_franka/            # 子包: Franka 机器人侧 (LeRobot Robot 接口)
 │   └── lerobot_robot_franka/
@@ -190,4 +190,4 @@ python scripts/tools/hdf5_to_lerobot_v21.py \
 - [Polymetis](https://github.com/facebookresearch/fairo) — Meta / facebookresearch，Franka 实时控制后端
 - [libfranka](https://github.com/frankaemika/libfranka) — Franka Emika FCI C++ 客户端
 - [DROID](https://github.com/droid-dataset/droid) — 笛卡尔阻抗增量 EE 控制流思路来源
-- 衍生自 [Shenzhaolong1330/lerobot_franka_teleop](https://github.com/Shenzhaolong1330/lerobot_franka_teleop) —— 在其骨架上重写 Route B 世界系遥操方案与录制管线
+- 衍生自 [Shenzhaolong1330/franka_vr_teleop](https://github.com/Shenzhaolong1330/franka_vr_teleop) —— 在其骨架上重写 Route B 世界系遥操方案与录制管线

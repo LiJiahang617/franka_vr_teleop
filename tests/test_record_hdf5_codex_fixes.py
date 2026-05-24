@@ -15,7 +15,7 @@ import time
 
 import numpy as np
 
-_P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 
 
 def _load():
@@ -333,7 +333,7 @@ def test_record_episode_passes_through_gripper_hw_timestamp(tmp_path):
         def send_action(self, a): pass
 
     import importlib.util, os
-    _P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    _P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
     s = importlib.util.spec_from_file_location("rrh", os.path.join(_P, "scripts/core/run_record_hdf5.py"))
     m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
 
@@ -377,7 +377,7 @@ def test_record_episode_handles_missing_gripper_timestamp(tmp_path):
         def send_action(self, a): pass
 
     import importlib.util, os
-    _P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    _P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
     s = importlib.util.spec_from_file_location("rrh", os.path.join(_P, "scripts/core/run_record_hdf5.py"))
     m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
 

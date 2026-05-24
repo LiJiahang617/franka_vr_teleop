@@ -1,7 +1,7 @@
 # NOTICE — 项目出处与依赖
 
 本项目（Franka Route B 世界系 VR 遥操数采）**魔改自** 上游框架
-`github.com/Shenzhaolong1330/lerobot_franka_teleop`（其 git 历史保留作出处；
+`github.com/Shenzhaolong1330/franka_vr_teleop`（其 git 历史保留作出处；
 本地已移除 origin remote，仅本地版本管理，不向上游推送）。
 
 在其 `lerobot_robot_franka` / `lerobot_teleoperator_franka` / `scripts` 骨架上，

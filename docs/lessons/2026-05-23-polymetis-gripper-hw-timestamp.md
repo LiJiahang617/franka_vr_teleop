@@ -32,7 +32,7 @@ libfranka 10Hz gripper push 是 firmware 限制（franka_ros / franka_ros2 / pol
 - `ad44bbce` cpp + CMakeLists（cmake option + std::round + nanos 溢出保护）
 - `5c74a40d` server.py 转发 timestamp 字段
 
-### lerobot_franka_teleop
+### franka_vr_teleop
 - `370a532` schema v2 加可选字段 + validate
 - `ec869ac` hdf5_writer 写可选 hw_timestamp
 - `c135bf3` record_episode 透传 effector_hw_ts

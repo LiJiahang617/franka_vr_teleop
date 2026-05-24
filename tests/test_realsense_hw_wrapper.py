@@ -20,7 +20,7 @@ import types
 import numpy as np
 import pytest
 
-_REPO = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_REPO = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 sys.path.insert(0, os.path.join(_REPO, "scripts"))
 
 

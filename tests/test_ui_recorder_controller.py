@@ -111,7 +111,7 @@ import importlib.util
 import os
 import queue
 
-_P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 _s = importlib.util.spec_from_file_location(
     "recorder_controller", os.path.join(_P, "scripts/ui/recorder_controller.py")
 )

@@ -2,7 +2,7 @@ import copy, importlib.util, os, sys, time
 import numpy as np
 
 _P = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 _s = importlib.util.spec_from_file_location(
     "rrh", os.path.join(_P, "scripts/core/run_record_hdf5.py"))
 # 注: 模块级 import 真包较重; 用 spec 但只测纯编排函数, 见下

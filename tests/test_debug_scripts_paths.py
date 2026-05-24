@@ -6,7 +6,7 @@ import re
 import shlex
 from pathlib import Path
 
-REPO = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+REPO = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 SERVICES = f"{REPO}/scripts/services"
 
 # 预期被守护的 debug 起停脚本(显式列举, 缺失即失败, 不静默跳过)

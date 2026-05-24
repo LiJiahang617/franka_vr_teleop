@@ -28,7 +28,7 @@ def test_ports():
 
 
 def test_repo_under_jhli_and_derived():
-    assert paths.REPO_ROOT == paths.JHLI_ROOT + "/lerobot_franka_teleop"
+    assert paths.REPO_ROOT == paths.JHLI_ROOT + "/franka_vr_teleop"
     assert paths.SCRIPTS_DIR == paths.REPO_ROOT + "/scripts"
     assert paths.SERVICES_DIR == paths.REPO_ROOT + "/scripts/services"
     assert paths.OC2ARM_R_PATH == paths.REPO_ROOT + "/.stage3_oc2arm_R.npy"
@@ -52,7 +52,7 @@ def test_env_override():
     try:
         _reload_paths()
         assert paths.JHLI_ROOT == "/tmp/xx_jhli"
-        assert paths.REPO_ROOT == "/tmp/xx_jhli/lerobot_franka_teleop"
+        assert paths.REPO_ROOT == "/tmp/xx_jhli/franka_vr_teleop"
     finally:
         _restore_env("FRANKA_JHLI_ROOT", prev)
         _reload_paths()  # 恢复 paths 到当前环境默认, 不污染后续测试
@@ -73,7 +73,7 @@ def test_independent_env_overrides():
             _reload_paths()
             assert getattr(paths, attr) == val, (env_key, attr)
             # 仅该常量受影响, REPO_ROOT 等不被串改
-            assert paths.REPO_ROOT == paths.JHLI_ROOT + "/lerobot_franka_teleop"
+            assert paths.REPO_ROOT == paths.JHLI_ROOT + "/franka_vr_teleop"
         finally:
             _restore_env(env_key, prev)
             _reload_paths()

@@ -1,6 +1,6 @@
 """回归: record_cfg_unityvr.yaml 里 oc2base_path 必须指向真实存在的标定文件。
 
-整合期 "jhli -> jhli/lerobot_franka_teleop" 路径机械改写曾漏掉这行(陈旧 jhli
+整合期 "jhli -> jhli/franka_vr_teleop" 路径机械改写曾漏掉这行(陈旧 jhli
 根路径无文件), 致真机 teleop connect 时 RuntimeError "未找到标定 R"。此测试
 在离线阶段就拦住这类陈旧/失配的标定路径, 不必等真机才发现。
 """
@@ -8,7 +8,7 @@ import os
 
 import yaml
 
-REPO = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+REPO = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 CFG = f"{REPO}/scripts/config/record_cfg_unityvr.yaml"
 
 

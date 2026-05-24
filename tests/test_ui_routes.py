@@ -171,7 +171,7 @@ import os
 import queue
 
 # 使用绝对路径确保无论从哪里运行都正确
-_P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 
 _cp = importlib.util.spec_from_file_location(
     "control_panel", os.path.join(_P, "scripts/ui/control_panel.py")

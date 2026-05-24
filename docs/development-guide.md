@@ -29,8 +29,8 @@
 
 ```bash
 source /home/ubuntu/Desktop/jhli/envs/franka-teleop/bin/activate
-cd /home/ubuntu/Desktop/jhli/lerobot_franka_teleop
-pip install -e .                          # 主包 lerobot_franka_teleop（含 scripts/）
+cd /home/ubuntu/Desktop/jhli/franka_vr_teleop
+pip install -e .                          # 主包 franka_vr_teleop（含 scripts/）
 pip install -e lerobot_robot_franka        # 子包①
 pip install -e lerobot_teleoperator_franka # 子包②
 ```
@@ -70,7 +70,7 @@ debug/                        诊断与运维脚本
 
 ```bash
 source /home/ubuntu/Desktop/jhli/envs/franka-teleop/bin/activate
-cd /home/ubuntu/Desktop/jhli/lerobot_franka_teleop
+cd /home/ubuntu/Desktop/jhli/franka_vr_teleop
 python -m pytest tests/ -q
 ```
 
@@ -142,7 +142,7 @@ bash debug/franka_clean_restart.sh   # 清理 → 起臂 → 验 → 起 zerorpc
 **启动时序**：先臂（50051）→ 再 zerorpc（4242）→ 再夹爪（50052）。`_run_polymetis_rw.sh` / `_run_zerorpc_iface.sh` 用 `flock` 防重复启动、`setsid` 独立进程组便于 `kill -- -PGID` 整组清理。
 
 > 真机相关脚本中"仅观测、不发控制指令"的已在注释标注。涉及真机务必先做连接/读取验证。
-> debug 脚本内绝对路径已按整合（jhli → jhli/lerobot_franka_teleop）回归修正（指向 `scripts/services/`），但仍请核对服务实际状态。
+> debug 脚本内绝对路径已按整合（jhli → jhli/franka_vr_teleop）回归修正（指向 `scripts/services/`），但仍请核对服务实际状态。
 
 ---
 

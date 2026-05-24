@@ -12,7 +12,7 @@ record:
   color_preflight: true                        # 启动期色彩通道序预检 (BGR vs RGB)
 
   # hdf5 落盘目录 (UI 录制 .h5 存放位置)
-  out_dir: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/recordings"
+  out_dir: "/home/ubuntu/Desktop/jhli/franka_vr_teleop/recordings"
 
   # AsyncEpisodeSaver 队列深度; 长 ep 写盘慢时排队的最大数量, 满则 submit 抛 QueueFullError
   async_saver_maxsize: 5
@@ -48,7 +48,7 @@ record:
       # 全局[位置, 姿态]标量增益 (每轴微调用 pos/rot_axis_gain)
       pose_scaler: [3.0, 2.0]
       channel_signs: [1, 1, 1, -1, -1, 1]     # [x,y,z,rx,ry,rz] 各轴符号
-      oc2base_path: "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/.stage3_oc2arm_R.npy"
+      oc2base_path: "/home/ubuntu/Desktop/jhli/franka_vr_teleop/.stage3_oc2arm_R.npy"
       robot_ip: "127.0.0.1"
       robot_port: 4242
       # 位置每轴增益 [x,y,z]; 叠加在 pose_scaler[0] 上, 仅缩放灵敏度不改方向 (§10.2(0))

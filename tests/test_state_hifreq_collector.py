@@ -22,7 +22,7 @@ import h5py
 import numpy as np
 import pytest
 
-_P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+_P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
 sys.path.insert(0, _P)
 sys.path.insert(0, os.path.join(_P, "scripts"))
 

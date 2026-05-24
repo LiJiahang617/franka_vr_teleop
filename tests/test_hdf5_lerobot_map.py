@@ -14,7 +14,7 @@ import cv2
 import pytest
 
 sys.path.insert(0, "/home/ubuntu/Desktop/jhli")
-sys.path.insert(0, "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop/scripts")
+sys.path.insert(0, "/home/ubuntu/Desktop/jhli/franka_vr_teleop/scripts")
 
 from tools.hdf5_lerobot_map import (
     build_feature_specs,
@@ -724,7 +724,7 @@ def test_converter_v30_warns_when_hw_timestamp_missing(tmp_path):
 
     out = tmp_path / "out"
     import subprocess
-    _P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    _P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
     r = subprocess.run([
         "/home/ubuntu/Desktop/jhli/envs/franka-teleop/bin/python",
         f"{_P}/scripts/tools/hdf5_to_lerobot.py",
@@ -749,7 +749,7 @@ def test_converter_v21_warns_when_hw_timestamp_missing(tmp_path):
 
     out = tmp_path / "out"
     import subprocess
-    _P = "/home/ubuntu/Desktop/jhli/lerobot_franka_teleop"
+    _P = "/home/ubuntu/Desktop/jhli/franka_vr_teleop"
     r = subprocess.run([
         "/home/ubuntu/Desktop/jhli/envs/franka-teleop/bin/python",
         f"{_P}/scripts/tools/hdf5_to_lerobot_v21.py",
