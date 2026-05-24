@@ -260,15 +260,19 @@ def main():
     # thread-affinity 死锁（lesson 2026-05-24-phaseE-ui-zerorpc-gevent-daemon-thread.md）。
     # zerorpc client 在 build_robot_and_teleop 主线程创建，必须由主线程消费命令。
     #
-    # H3 fix: 用 werkzeug.make_server 拿到 server 句柄，daemon=False + finally
-    # 里 server.shutdown() + thread.join，避免 POST 中途被 daemon=True 强杀
-    # （/save_episode、/start 等关键请求可能正在落盘）。
+    # H3 fix: 用 werkzeug.make_server 拿到 server 句柄，finally 里 shutdown() 让
+    # serve_forever 循环退出。注意：werkzeug ThreadedWSGIServer 工作线程 daemon_threads
+    # 默认 True，handler 是 daemon 子线程，shutdown() 后随主进程退；本路径主要保证
+    # serve_forever 干净退出，不强承诺等所有在飞 handler 完成。Stop/Start handler 自身
+    # 是 ≤几 ms 的轻操作（只写 events + queue），实际风险极小。
     http_server = make_server(
         ui_cfg["host"], ui_cfg["port"], app, threaded=True
     )
     flask_thread = threading.Thread(
         target=http_server.serve_forever,
-        daemon=False,
+        # M1 (Codex 复审): daemon=True 兜底防 shutdown 卡死挂进程。主停机靠下方
+        # http_server.shutdown() + join，daemon=True 仅是兜底，主进程退时强清线程。
+        daemon=True,
         name="flask-server",
     )
     flask_thread.start()
@@ -284,9 +288,9 @@ def main():
     except KeyboardInterrupt:
         log.info("[UI] Ctrl+C，优雅退出")
     finally:
-        # 有序清理：①优雅停 Flask（等在飞请求完成）→ ②停 preview → ③stop_recording
-        # → ④断硬件。Flask 先停可阻止新 /api 请求触发 controller 操作。
-        log.info("[UI] 优雅停 Flask 服务器（等在飞请求 ≤5s）...")
+        # 有序清理：①停 Flask serve_forever（阻止新 /api 请求）→ ②停 preview
+        # → ③stop_recording → ④断硬件。
+        log.info("[UI] 停 Flask serve_forever（≤5s）...")
         try:
             http_server.shutdown()
         except Exception as e:

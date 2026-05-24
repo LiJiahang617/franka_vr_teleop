@@ -361,8 +361,10 @@ class RecorderController:
 
         H4 fix: 状态机失败 fail-loud (raise)。原 log.warning 让 main 在异常状态下
         仍进入命令消费循环+发真机动作，是 silent-broken。
+
+        H1 残余 fix (Codex 复审): 不在此重置 _should_stop——Flask 已在 prepare 前启动，
+        Stop 可能已写入 _should_stop=True，重置会吞掉。__init__ 已设初值 False，复用一次。
         """
-        self._should_stop = False
         self._sm.transition(UIState.WAITING)  # IllegalTransition 直接抛给 main
 
     def consume_commands_blocking(self) -> None:
