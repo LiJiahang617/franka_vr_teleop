@@ -446,7 +446,9 @@ def test_record_config_controller_preflight_defaults():
     assert hasattr(rc, "controller_preflight_enabled"), "RecordConfig 应有 controller_preflight_enabled"
     assert rc.controller_preflight_enabled is True, f"默认应为 True，实际 {rc.controller_preflight_enabled!r}"
     assert hasattr(rc, "controller_preflight_python"), "RecordConfig 应有 controller_preflight_python"
-    assert "polymetis" in rc.controller_preflight_python, (
+    # 兼容 expandvars 后 (含 'polymetis' 或 expansion 失败时含 '${POLYMETIS_ENV}')
+    assert ("polymetis" in rc.controller_preflight_python or
+            "POLYMETIS_ENV" in rc.controller_preflight_python), (
         f"默认 python 路径应含 polymetis，实际 {rc.controller_preflight_python!r}"
     )
     assert hasattr(rc, "controller_preflight_conda_prefix"), "RecordConfig 应有 controller_preflight_conda_prefix"

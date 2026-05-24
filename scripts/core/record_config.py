@@ -182,14 +182,16 @@ class RecordConfig:
         self.controller_preflight_enabled = parse_bool(
             cp_cfg.get("enabled"), default=True, key_name="record.controller_preflight.enabled"
         )
-        self.controller_preflight_python = str(
+        # 展开 ${POLYMETIS_ENV} 等 env var (开源后用户路径不同)
+        import os as _os
+        self.controller_preflight_python = _os.path.expandvars(str(
             cp_cfg.get("polymetis_python") or
-            "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python"
-        )
-        self.controller_preflight_conda_prefix = str(
+            "${POLYMETIS_ENV}/bin/python"
+        ))
+        self.controller_preflight_conda_prefix = _os.path.expandvars(str(
             cp_cfg.get("polymetis_conda_prefix") or
-            "/home/ubuntu/Desktop/jhli/envs/polymetis-local"
-        )
+            "${POLYMETIS_ENV}"
+        ))
 
         # AsyncEpisodeSaver 队列深度 (UI 模式 _wrapped_run_episodes 用)
         self.async_saver_maxsize: int = int(cfg.get("async_saver_maxsize", 5))

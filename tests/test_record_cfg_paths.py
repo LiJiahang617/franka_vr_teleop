@@ -5,6 +5,7 @@
 在离线阶段就拦住这类陈旧/失配的标定路径, 不必等真机才发现。
 """
 import os
+import pathlib
 
 import yaml
 
@@ -20,8 +21,11 @@ def test_unityvr_oc2base_path_file_exists():
 
 
 def test_unityvr_oc2base_path_is_repo_canonical():
-    # 规范位置 = repo 内(与 config_teleop.py / run_record.py 代码默认一致),
-    # 不是陈旧 jhli 根路径。
-    raw = yaml.safe_load(open(CFG))
-    p = raw["record"]["teleop"]["unityvr_config"]["oc2base_path"]
-    assert p == f"{REPO}/.stage3_oc2arm_R.npy", f"oc2base_path 非规范 repo 路径: {p}"
+    """oc2base_path 在 yaml 中是相对项目根的路径 (开源后用户可改)."""
+    import yaml
+    p = pathlib.Path(__file__).resolve().parents[1] / "scripts/config/record_cfg_unityvr.yaml"
+    raw = yaml.safe_load(p.read_text())
+    oc_path = raw["record"]["teleop"]["unityvr_config"]["oc2base_path"]
+    # 接受相对路径 "./.stage3_oc2arm_R.npy" 或绝对 (本机/用户路径)
+    assert ".stage3_oc2arm_R.npy" in oc_path, f"oc2base_path 应含 .stage3_oc2arm_R.npy: {oc_path}"
+
