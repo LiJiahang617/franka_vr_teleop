@@ -178,6 +178,72 @@ class RecorderController:
             self._log("UI go_home: 命令队列已满，丢弃 'home'")
             return False
 
+    def enable_vr_control(self) -> bool:
+        """启用 VR 控制 (ros2_realman_ws 同款): 入队 'vr_enable', 主线程消费时启 controller.
+
+        Flask handler 在 werkzeug 工作线程, 不能直调 zerorpc (gevent thread-affinity 死锁).
+        入队后 consume_commands_blocking 在主线程跑 _handle_vr_enable_cmd → robot.enable_arm_control.
+
+        Returns:
+            True 入队成功; False 队列已满.
+        """
+        try:
+            self._cmd_q.put_nowait("vr_enable")
+            self._log("[VR] 启用命令入队, 等主线程执行...")
+            return True
+        except queue.Full:
+            self._log("[VR] 启用命令队列已满, 丢弃")
+            return False
+
+    def disable_vr_control(self) -> bool:
+        """禁用 VR 控制: 入队 'vr_disable', 主线程消费时置 enabled=False."""
+        try:
+            self._cmd_q.put_nowait("vr_disable")
+            self._log("[VR] 禁用命令入队, 等主线程执行...")
+            return True
+        except queue.Full:
+            self._log("[VR] 禁用命令队列已满, 丢弃")
+            return False
+
+    def _handle_vr_enable_cmd(self) -> None:
+        """主线程消费 'vr_enable': 调 robot.enable_arm_control (zerorpc 安全)."""
+        if self._record_args is None:
+            self._log("[VR] enable 失败: attach_record_args 未调用")
+            return
+        rbt = self._record_args.get("robot")
+        if rbt is None or not hasattr(rbt, "enable_arm_control"):
+            self._log("[VR] enable 失败: robot 不支持 enable_arm_control")
+            return
+        ok = rbt.enable_arm_control()
+        if ok:
+            self._log("[VR] 臂控已启用 ✓ 现在 VR 可控制末端位姿 (按住右食指扳机)")
+        else:
+            self._log("[VR] 臂控启用失败, 检查 polymetis 服务是否健康")
+
+    def _handle_vr_disable_cmd(self) -> None:
+        """主线程消费 'vr_disable': 置 enabled=False."""
+        if self._record_args is None:
+            self._log("[VR] disable 失败: attach_record_args 未调用")
+            return
+        rbt = self._record_args.get("robot")
+        if rbt is None or not hasattr(rbt, "disable_arm_control"):
+            self._log("[VR] disable 失败: robot 不支持 disable_arm_control")
+            return
+        rbt.disable_arm_control()
+        self._log("[VR] 臂控已禁用 (机械臂保持当前位姿, 仅夹爪可控)")
+
+    def is_vr_control_enabled(self) -> bool:
+        """查 VR 臂控是否启用 (status_snapshot 用)."""
+        if self._record_args is None:
+            return False
+        rbt = self._record_args.get("robot")
+        if rbt is None or not hasattr(rbt, "is_arm_control_enabled"):
+            return False
+        try:
+            return bool(rbt.is_arm_control_enabled())
+        except Exception:
+            return False
+
     def start_payload_calib(self, dry_run: bool = False) -> bool:
         """Bug 6: 启动负载标定 subprocess (payload_ident.py).
 
@@ -220,6 +286,7 @@ class RecorderController:
                 "log_tail": list(self._log_tail),
                 "frame_count": self._frame_count,
                 "duration_sec": self._duration_sec,
+                "vr_control_enabled": self.is_vr_control_enabled(),
             }
 
     def update_latest_frame(self, cam_name: str, rgb: "np.ndarray") -> None:
@@ -419,6 +486,10 @@ class RecorderController:
                 self._handle_payload_calib_cmd(dry_run=False)
             elif cmd == "payload_calib_dry":
                 self._handle_payload_calib_cmd(dry_run=True)
+            elif cmd == "vr_enable":
+                self._handle_vr_enable_cmd()
+            elif cmd == "vr_disable":
+                self._handle_vr_disable_cmd()
             else:
                 log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
         log.info("[RecorderController] 主线程命令消费循环退出")

@@ -131,6 +131,29 @@ def build_app(controller=None) -> Flask:
             return jsonify({"ok": False, "error": "command queue full"}), 503
         return jsonify({"ok": True})
 
+    @app.route("/api/vr_enable", methods=["POST"])
+    def _api_vr_enable():
+        """启用 VR 臂控 (ros2_realman_ws 同款): 启 polymetis controller, send_action 接 update_ee.
+
+        默认 UI 启动后 VR 臂控 disabled. 用户主动点按钮启用.
+        """
+        err = _require_controller()
+        if err is not None:
+            return err
+        ok = controller.enable_vr_control()
+        if not ok:
+            return jsonify({"ok": False, "reason": "启用失败, 检查 polymetis"}), 503
+        return jsonify({"ok": True, "vr_control_enabled": True})
+
+    @app.route("/api/vr_disable", methods=["POST"])
+    def _api_vr_disable():
+        """禁用 VR 臂控: send_action 跳过 update_ee, 夹爪仍可控."""
+        err = _require_controller()
+        if err is not None:
+            return err
+        ok = controller.disable_vr_control()
+        return jsonify({"ok": ok, "vr_control_enabled": False})
+
     @app.route("/api/status", methods=["GET"])
     def _api_status():
         """返回录制器当前状态快照（JSON）。"""

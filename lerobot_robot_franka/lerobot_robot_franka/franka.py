@@ -44,7 +44,47 @@ class Franka(Robot):
         # 动作平滑：指数移动平均 (EMA) 滤波器
         self._smoothing_alpha = 0.4  # 平滑系数，越小越平滑 (0~1)，0.4 是较好的折中
         self._smoothed_delta = None  # 上一次平滑后的 delta
-        
+
+        # VR enable 开关 (ros2_realman_ws 同款设计):
+        # 默认 False, send_action 跳过 update_desired_ee_pose 但保留夹爪命令.
+        # 主控通过 enable_arm_control()/disable_arm_control() 切换;
+        # enable 时主动启 joint impedance controller (防 polymetis stale terminate).
+        self._arm_control_enabled: bool = False
+
+    def enable_arm_control(self) -> bool:
+        """启用臂控: 启 joint impedance controller + 置 enabled=True.
+
+        必须在 connect 之后调. polymetis controller 启动后, 后续 send_action
+        持续 update_current_policy 维持 controller alive (不会 stale terminate).
+
+        Returns:
+            True 启用成功; False 启动 controller 失败.
+        """
+        if not self.is_connected or self._robot is None:
+            logger.warning("[ROBOT] enable_arm_control 失败: robot 未连接")
+            return False
+        try:
+            # 幂等: polymetis 内部能识别重复启动
+            self._robot.robot_start_joint_impedance_control()
+            self._arm_control_enabled = True
+            logger.info("[ROBOT] 臂控已启用 (joint impedance running)")
+            return True
+        except Exception as e:
+            logger.error(f"[ROBOT] enable_arm_control 失败: {e}")
+            return False
+
+    def disable_arm_control(self) -> None:
+        """禁用臂控: 置 enabled=False (send_action 跳过 update_desired_ee_pose).
+
+        不主动 terminate controller (避免与其他进程冲突);
+        polymetis 在无 update 时自动 stale terminate (~1s).
+        """
+        self._arm_control_enabled = False
+        logger.info("[ROBOT] 臂控已禁用 (send_action 仅处理夹爪)")
+
+    def is_arm_control_enabled(self) -> bool:
+        return self._arm_control_enabled
+
     def connect(self) -> None:
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self.name} is already connected.")
@@ -225,7 +265,17 @@ class Franka(Robot):
         return action
 
     def _send_action_cartesian(self, action: dict[str, Any]) -> None:
-        """Send action in spacemouse/oculus mode (delta ee pose)."""
+        """Send action in spacemouse/oculus mode (delta ee pose).
+
+        VR enable: _arm_control_enabled=False 时跳过 update_desired_ee_pose
+        (避免 polymetis 报 no controller running), 但仍处理 gripper 命令.
+        """
+        # VR disable 短路: 跳过臂控, 仍处理夹爪 (用户可独立测试夹爪)
+        if not self._arm_control_enabled:
+            if "gripper_cmd_bin" in action:
+                self._handle_gripper(action["gripper_cmd_bin"], is_binary=True)
+            return
+
         # Check for reset request
         if action.get("reset_requested", False):
             logger.info("[ROBOT] Reset requested, moving to home position...")

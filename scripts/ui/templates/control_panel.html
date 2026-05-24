@@ -402,6 +402,23 @@
           /* 日志 */
           var logs = j.log_tail || [];
           document.getElementById('log').textContent = logs.join('\n');
+
+          /* VR 臂控状态 (ros2_realman_ws 同款) */
+          var vrEn = j.vr_control_enabled === true;
+          var vrStatus = document.getElementById('vr-status');
+          var btnVrEn = document.getElementById('btn-vr-enable');
+          var btnVrDis = document.getElementById('btn-vr-disable');
+          if (vrEn) {
+            vrStatus.textContent = '🟢 VR 臂控已启用 (按住右食指扳机移动末端)';
+            vrStatus.style.color = '#86efac';
+            btnVrEn.disabled = true;
+            btnVrDis.disabled = false;
+          } else {
+            vrStatus.textContent = '🔴 VR 臂控未启用 (机械臂不会跟随 VR, 夹爪仍可控)';
+            vrStatus.style.color = '#fca5a5';
+            btnVrEn.disabled = false;
+            btnVrDis.disabled = true;
+          }
         })
         .catch(function() {});
     }
