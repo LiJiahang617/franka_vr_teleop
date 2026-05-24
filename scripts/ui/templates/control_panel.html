@@ -336,12 +336,24 @@
 
   </div>
 
-  <!-- 修订 B：负载标定引导弹层 -->
+  <!-- 负载标定弹层 (Bug 6 + Codex H1: 强制安全确认) -->
   <div id="payload-modal">
     <div id="payload-modal-box">
-      <div id="payload-modal-title">负载标定 — 操作引导</div>
-      <div id="payload-modal-body"></div>
-      <button id="payload-modal-close" onclick="closePayloadModal()">知道了</button>
+      <div id="payload-modal-title">⚠️ 负载标定 — 安全确认</div>
+      <div id="payload-modal-body">
+        <p><b>请仔细阅读后操作:</b></p>
+        <p>1. 标定将驱动机械臂跑 <b>17 位姿 × 2 方向 (~4-5 分钟)</b>, 幅度较大.</p>
+        <p>2. <b>UI Stop 仅 kill subprocess</b>, polymetis 当前 move 可能继续到目标位置.
+           <b>物理急停按钮是唯一可靠停车</b>.</p>
+        <p>3. <b>开始前: 人离工作区, 物理急停在手.</b></p>
+        <p>4. 完成后会在 log 区显示 m (mass) + c_flange, 手填 Franka Desk →
+           End Effector → Mechanical Data, Activate 后重启 polymetis-rw.</p>
+      </div>
+      <button id="payload-modal-confirm" onclick="confirmPayloadCalib()"
+              style="background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;border:none;border-radius:8px;padding:8px 20px;font-weight:700;cursor:pointer;margin-right:8px;">
+        ⚠️ 我已确认安全, 启动标定
+      </button>
+      <button id="payload-modal-close" onclick="closePayloadModal()">取消</button>
     </div>
   </div>
 
@@ -408,14 +420,24 @@
 
     /* ===== 修订 B：负载标定弹层 ===== */
     function triggerPayloadCalib() {
-      fetch('/api/payload-calib', { method: 'POST', cache: 'no-store' })
+      // Bug 6 + Codex H1: 第一步弹安全确认窗 (不发请求, 仅显示警告)
+      document.getElementById('payload-modal').classList.add('show');
+    }
+
+    function confirmPayloadCalib() {
+      // 用户点'我已确认安全, 启动标定' → 发请求带 confirm 参数
+      closePayloadModal();
+      fetch('/api/payload-calib?confirm=physical-estop-in-hand', { method: 'POST', cache: 'no-store' })
         .then(function(r) { return r.json(); })
         .then(function(j) {
-          var modal = document.getElementById('payload-modal');
-          document.getElementById('payload-modal-body').textContent = j.guidance || '请参考 Franka Desk 完成负载标定。';
-          modal.classList.add('show');
+          if (j.ok) {
+            console.log('payload-calib 启动:', j.guidance || '');
+            // 进度看 log_tail 区域 (轮询 /api/status 已经渲染)
+          } else {
+            alert('启动失败: ' + (j.reason || JSON.stringify(j)));
+          }
         })
-        .catch(function(e) { console.error('payload-calib', e); });
+        .catch(function(e) { console.error('payload-calib', e); alert('请求失败: ' + e); });
     }
 
     function closePayloadModal() {
