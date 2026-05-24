@@ -172,6 +172,28 @@ def main():
     from core import preflight as pf
     from tools.hdf5_lerobot_map import _decode as _hdf5_decode  # 接线错=模块级 bug，fail-loud
 
+    # 0. 控制器预检 (Bug VR-控不了末端 真根因): 幂等启动 cartesian impedance controller.
+    # UI 入口 fork run_record_hdf5.py 时漏了这一步, 导致 send_action 报 "no controller running".
+    # 与 run_record_hdf5.py main 第 777-792 行同款.
+    if record_cfg.controller_preflight_enabled:
+        log.info("[PREFLIGHT] 启动/确认 cartesian impedance controller...")
+        _arm_client = getattr(robot, "_robot", None)
+        if _arm_client is None:
+            _preflight_abort(
+                robot, teleop,
+                "无法获取 arm zerorpc client(robot._robot 缺失)→检查 robot 连接/wrapper",
+            )
+        controller_verdict = pf.run_controller_preflight(
+            client=_arm_client,
+            polymetis_python=record_cfg.controller_preflight_python,
+            polymetis_conda_prefix=record_cfg.controller_preflight_conda_prefix,
+        )
+        if not controller_verdict.ok:
+            _preflight_abort(robot, teleop, f"控制器预检失败: {controller_verdict.reason}")
+        log.info(f"[PREFLIGHT] {controller_verdict.reason}")
+    else:
+        log.info("[PREFLIGHT] 控制器预检已禁用 (yaml record.controller_preflight.enabled=false)")
+
     # 1. 夹爪预检（仅当 use_gripper=True；zerorpc client 由 robot._robot 获取）
     if getattr(record_cfg, "use_gripper", True):
         log.info("[PREFLIGHT] 运行夹爪预检（进程存活/连接就绪/width 真变）…")
