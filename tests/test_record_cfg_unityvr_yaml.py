@@ -271,8 +271,8 @@ class TestYamlContainsNewKeys:
         """yaml rot_axis_gain 默认 [1.0, 1.0, 1.0]。"""
         raw = _load_yaml()
         gain = raw["record"]["teleop"]["unityvr_config"]["rot_axis_gain"]
-        assert list(gain) == [1.0, 1.0, 1.0], (
-            f"rot_axis_gain 默认应为 [1.0, 1.0, 1.0]，实际 {gain}"
+        assert list(gain) == [2.0, 2.0, 2.0], (
+            f"rot_axis_gain 默认应为 [2.0, 2.0, 2.0] (P0 yaml 实测值)，实际 {gain}"
         )
 
 

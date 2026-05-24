@@ -56,6 +56,8 @@ def _make_fake_unityvr_teleop_config(**extra_defaults):
         robot_port: int = 4242
         pos_axis_gain: list = dc_field(default_factory=lambda: [1.0, 1.0, 1.0])
         rot_axis_gain: list = dc_field(default_factory=lambda: [1.0, 1.0, 1.0])
+        trigger_threshold: float = 0.85
+        smoothing_alpha: float = 0.4
 
     return FakeUnityVRTeleopConfig
 
@@ -330,6 +332,8 @@ def test_record_config_create_teleop_config_passes_axis_gain():
         robot_port: int = 4242
         pos_axis_gain: list = dc_field(default_factory=lambda: [1.0, 1.0, 1.0])
         rot_axis_gain: list = dc_field(default_factory=lambda: [1.0, 1.0, 1.0])
+        trigger_threshold: float = 0.85
+        smoothing_alpha: float = 0.4
 
         def __post_init__(self):
             captured["pos_axis_gain"] = list(self.pos_axis_gain)

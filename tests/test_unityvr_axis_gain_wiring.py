@@ -75,7 +75,8 @@ def _make_fake_unityvr_robot_module(captured_calls):
         def __init__(self, oc2base_path="", pose_scaler=(1., 1.),
                      channel_signs=(1, 1, 1, 1, 1, 1),
                      use_gripper=True, robot_ip="127.0.0.1", robot_port=4242,
-                     pos_axis_gain=(1., 1., 1.), rot_axis_gain=(1., 1., 1.)):
+                     pos_axis_gain=(1., 1., 1.), rot_axis_gain=(1., 1., 1.),
+                     trigger_threshold=0.85):
             captured_calls.append({
                 "pos_axis_gain": list(pos_axis_gain),
                 "rot_axis_gain": list(rot_axis_gain),
