@@ -54,3 +54,6 @@ _gripper_*.log
 # 录制数据 (整目录, 含 .h5/.parquet/.mp4/.json/.jsonl)
 /recordings/
 /_payload_ident_v2_out_*.npz
+
+# 用户本机路径 env (run_ui.sh 自动加载)
+.env

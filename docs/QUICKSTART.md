@@ -82,19 +82,41 @@ cp scripts/config/record_cfg_unityvr.yaml my_cfg.yaml
 
 ## 5. 启 Web UI 录制
 
-> ⚠️ **运行前必须**  (主项目 env). base env 没装 werkzeug/flask, 会撞 ModuleNotFoundError.
+### 5.1 Daily Run（每次开机后启动 UI 的最短路径）
+
+> **首次配置（只做一次）**：把下面三行加到 `~/.bashrc` 末尾后 `source ~/.bashrc`
+>
+> ```bash
+> export POLYMETIS_ENV=/home/ubuntu/Desktop/jhli/envs/polymetis-local   # polymetis conda env 根
+> export POLYMETIS_SOURCE=/home/ubuntu/Desktop/jhli/fairo-franka        # polymetis 源码根
+> export FRANKA_TELEOP_VENV=/home/ubuntu/Desktop/jhli/envs/franka-teleop # 采集侧 venv 根
+> ```
+>
+> 三个变量分别用在：`controller_preflight` yaml 占位符展开（POLYMETIS_ENV / POLYMETIS_SOURCE）、UI 入口 Python（FRANKA_TELEOP_VENV，因为采集侧是 venv 不是 conda，未 activate 时 PATH 找不到）。
+
+**每次启动 UI**（任选一种）：
 
 ```bash
-python scripts/core/run_record_hdf5_ui.py --config my_cfg.yaml
+# 方式 A：脚本一键（推荐）
+cd ~/Desktop/jhli/franka_vr_teleop
+./scripts/run_ui.sh                                # 用默认 yaml
+./scripts/run_ui.sh scripts/config/my_cfg.yaml     # 指定 yaml
+
+# 方式 B：手动展开（与上等价，便于调试）
+cd ~/Desktop/jhli/franka_vr_teleop
+$FRANKA_TELEOP_VENV/bin/python scripts/core/run_record_hdf5_ui.py     --config scripts/config/record_cfg_unityvr.yaml
 ```
+
+> ⚠️ 必须在 `franka-teleop` venv 跑（base env 没装 werkzeug/flask 会撞 ModuleNotFoundError）。
+
+### 5.2 浏览器操作
 
 浏览器开 `http://<host>:5055`（同机访问用 `127.0.0.1`，远端用机器 IP）：
 
-1. 点 **启用 VR 控制**（按钮变绿，后台启 adb logcat reader）
-2. 戴 Quest，**按住右食指扳机**进入跟手模式（松开扳机 = 暂停跟手，机械臂不动）
-3. 点 **开始录制** → 顶部 `state` 变 `recording`，`frame_count` 上涨
-4. 操作完成 → 点 **结束并保存** 写 `.h5` 到 `out_dir`（或 **丢弃** 不要这条）
-5. 录多条：重复 3-4。**回 Home** 按钮可在 episode 间手动回示教位
+1. 点 **启用 VR 控制**（按钮变绿，后台启 adb logcat reader + polymetis joint impedance controller）。**此时 VR 即可控制末端**——按住右食指扳机跟手，松开停止；不需要先点开始录制。
+2. 点 **开始录制** → 顶部 `state` 变 `recording`，`frame_count` 上涨
+3. 操作完成 → 点 **结束并保存** 写 `.h5` 到 `out_dir`（或 **丢弃** 不要这条）
+4. 录多条：重复 2-3。**回 Home** 按钮可在 episode 间手动回示教位
 
 ---
 
