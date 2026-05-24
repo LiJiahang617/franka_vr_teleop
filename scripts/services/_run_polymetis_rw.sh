@@ -1,5 +1,9 @@
 #!/bin/bash
 # polymetis-rw 启动包装 (强化版 v3 - 用 setsid + process group, 保证带走所有子进程)
+# 开源可配置: 通过 env var 覆盖路径
+: "${POLYMETIS_ENV:=/home/ubuntu/Desktop/jhli/envs/polymetis-local}"
+: "${POLYMETIS_SOURCE:=/home/ubuntu/Desktop/jhli/fairo-franka}"
+
 PORT=50051
 LOCK_FILE=/tmp/polymetis_rw.lock
 LOG_TAG="[polymetis-rw]"
@@ -71,10 +75,10 @@ trap cleanup EXIT INT TERM HUP
 unset ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION AMENT_PREFIX_PATH COLCON_PREFIX_PATH \
       ROS_PACKAGE_PATH RMW_IMPLEMENTATION CMAKE_PREFIX_PATH PYTHONPATH LD_LIBRARY_PATH PKG_CONFIG_PATH
 source /home/ubuntu/miniconda3/etc/profile.d/conda.sh
-conda activate /home/ubuntu/Desktop/jhli/envs/polymetis-local
+conda activate "${POLYMETIS_ENV}"
 export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vE '^/opt/ros' | paste -sd: -)"
 export POLYMETIS_REALTIME_NO_SUDO=1
-cd /home/ubuntu/Desktop/jhli/fairo-franka/polymetis/polymetis/python/scripts
+cd "${POLYMETIS_SOURCE}/polymetis/polymetis/python/scripts"
 
 # ============ 启动 (setsid 独立进程组, 便于 kill -- -PGID 一锅端) ============
 log "启动 launch_robot.py (独立 process group)"
