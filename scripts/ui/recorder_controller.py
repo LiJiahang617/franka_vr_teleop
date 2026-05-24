@@ -178,19 +178,20 @@ class RecorderController:
             self._log("UI go_home: 命令队列已满，丢弃 'home'")
             return False
 
-    def start_payload_calib(self) -> bool:
+    def start_payload_calib(self, dry_run: bool = False) -> bool:
         """Bug 6: 启动负载标定 subprocess (payload_ident.py).
 
-        - 入队 'payload_calib', 主线程消费时切 CALIBRATING 状态
-        - subprocess 用 polymetis-local Python 跑 payload_ident.py (~4-5 分钟)
-        - stdout 流式塞 _log_tail; 完成后切回 WAITING
+        Args:
+            dry_run: True → payload_ident.py 加 --dry-run 标志, 仅打印位姿+
+                     运动学自检, 不发任何机械臂运动 (用于自测).
 
         Returns:
             True 命令成功入队; False 命令队列已满.
         """
+        cmd_name = "payload_calib_dry" if dry_run else "payload_calib"
         try:
-            self._cmd_q.put_nowait("payload_calib")
-            self._log("UI start_payload_calib: 命令入队 'payload_calib'")
+            self._cmd_q.put_nowait(cmd_name)
+            self._log(f"UI start_payload_calib: 命令入队 {cmd_name!r}")
             return True
         except queue.Full:
             self._log("UI start_payload_calib: 命令队列已满, 丢弃")
@@ -415,7 +416,9 @@ class RecorderController:
             elif cmd == "home":
                 self._handle_home_cmd()
             elif cmd == "payload_calib":
-                self._handle_payload_calib_cmd()
+                self._handle_payload_calib_cmd(dry_run=False)
+            elif cmd == "payload_calib_dry":
+                self._handle_payload_calib_cmd(dry_run=True)
             else:
                 log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
         log.info("[RecorderController] 主线程命令消费循环退出")
@@ -593,7 +596,7 @@ class RecorderController:
             except IllegalTransition as e:
                 log.warning(f"[RecorderController] _handle_start_cmd finally 状态回退失败: {e}")
 
-    def _handle_payload_calib_cmd(self) -> None:
+    def _handle_payload_calib_cmd(self, dry_run: bool = False) -> None:
         """Bug 6: 跑 payload_ident.py subprocess, stdout 实时写 _log_tail.
 
         关键点:
@@ -613,16 +616,30 @@ class RecorderController:
 
         py = "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python"
         script = "/home/ubuntu/Desktop/jhli/payload_identification/payload_ident.py"
+        conda_prefix = "/home/ubuntu/Desktop/jhli/envs/polymetis-local"
         cmd = [py, script]
-        self._log("[CALIB] 启动负载辨识 subprocess (~4-5 分钟, 17 位姿×2 方向)...")
-        self._log("[CALIB] 警告: 机械臂将慢速跑多位姿, 人离工作区, 急停在手!")
+        if dry_run:
+            cmd.append("--dry-run")
+            self._log("[CALIB] DRY-RUN: payload_ident.py 仅自检, 不发任何机械臂运动")
+        else:
+            self._log("[CALIB] 启动负载辨识 subprocess (~4-5 分钟, 17 位姿×2 方向)...")
+            self._log("[CALIB] 警告: 机械臂将慢速跑多位姿, 人离工作区, 急停在手!")
 
+        # Bug 6 fix: payload_ident.py README 要求 conda activate polymetis-local 才能跑;
+        # subprocess 不继承 conda env, 手动设 CONDA_PREFIX + 调整 PATH (torchcontrol
+        # pinocchio.cpython.so 在 /home/ubuntu/Desktop/Workspace/miniconda3/lib/libtorchscript_pinocchio.so).
+        import os as _os
+        env = _os.environ.copy()
+        env["CONDA_PREFIX"] = conda_prefix
+        env["PATH"] = f"{conda_prefix}/bin:{env.get('PATH', '')}"
+        env["LD_LIBRARY_PATH"] = f"{conda_prefix}/lib:{env.get('LD_LIBRARY_PATH', '')}"
         proc = None
         try:
             proc = _sp.Popen(
                 cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT,
                 bufsize=1, text=True,
                 cwd="/home/ubuntu/Desktop/jhli/payload_identification",
+                env=env,
             )
             for line in proc.stdout:
                 line = line.rstrip()
@@ -630,7 +647,21 @@ class RecorderController:
                     self._log(f"[CALIB] {line}")
                 if self._should_stop:
                     self._log("[CALIB] 收到停止信号, 杀 subprocess")
+                    # H2 (Codex): proc.kill 只杀 client, polymetis controller 可能继续
+                    # 当前 move. best-effort: 通过主进程 robot zerorpc 调 terminate
+                    # current controller, 让 polymetis 切回默认 hold (机械臂停在当前位姿).
+                    # 仅 best-effort; 物理急停仍是唯一可靠停车.
                     proc.kill()
+                    try:
+                        rbt = (self._record_args or {}).get("robot")
+                        zclient = getattr(rbt, "_robot", None) if rbt else None
+                        if zclient is not None and hasattr(zclient, "terminate_current_controller"):
+                            zclient.terminate_current_controller()
+                            self._log("[CALIB] best-effort 已调 terminate_current_controller (机械臂应停在当前位姿)")
+                        else:
+                            self._log("[CALIB] warn: zerorpc 桥未暴露 terminate_current_controller; polymetis 当前 move 可能继续")
+                    except Exception as e:
+                        self._log(f"[CALIB] terminate_current_controller best-effort 失败: {type(e).__name__}: {e}")
                     break
             ret = proc.wait()
             if ret == 0:

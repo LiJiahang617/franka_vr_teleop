@@ -78,9 +78,9 @@ RecorderController = _rc_mod.RecorderController
 log = logging.getLogger("rec_hdf5_ui")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-# Bug 4 fix: Werkzeug access log 每请求一行, 前端 30Hz 轮询 /api/status + 2 路
-# /api/preview ≈ 90 行/秒, 完全淹没真信号. 调到 ERROR 仅留致命错误.
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
+# Bug 4 fix (Codex C): Werkzeug access log 每请求一行 (30Hz × 3 路由 ≈ 90/s) 噪音过大.
+# 调到 WARNING: 屏蔽 200/304 access log, 仍保留 4xx/5xx 客户端/服务器错误 (诊断必需).
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
 def main():
@@ -256,9 +256,11 @@ def main():
         task_name=task_name,
         oc2base_R=R,
         vr_source=record_cfg.control_mode,
-        # Bug 2 后续: UI 模式每次点开始只录 1 条 ep, save/discard 后回 waiting 等下次 start.
-        # yaml.task.num_episodes 仅在 terminal 键盘模式有意义 (run_record_hdf5.py 入口).
-        episodes=1,
+        # M1 (Codex 复审): 撤销强制 episodes=1, 改为 yaml.task.num_episodes 决定.
+        # UI 模式语义: 每次点开始录 yaml 配置的 num_episodes 条 ep (yaml 默认 1).
+        # 用户可在 yaml 改为更大批量, save/discard 后会自动开下一条 ep.
+        # 配合 yaml reset_between_episodes=false 时 ep 间不自动 reset (停留位姿).
+        episodes=episodes,
         reset_fn=robot.reset,   # Bug 2: home 按钮始终可用; ep 间 auto-reset 由 _wrapped 控
         reset_wait=reset_wait_sec,
     )

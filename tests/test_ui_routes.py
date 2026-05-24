@@ -113,17 +113,27 @@ def test_api_only_accepts_correct_verb():
 
 # --- 修订 B：payload-calib 占位路由 ---
 
-def test_api_payload_calib_returns_200():
-    """POST /api/payload-calib 返回 200（占位路由可达）。"""
+_CONFIRM_QUERY = "?confirm=physical-estop-in-hand"
+
+def test_api_payload_calib_without_confirm_412():
+    """Codex H1: 未传 confirm → 412 Precondition Failed (强制承认风险)."""
     c, _, _ = _client()
     r = c.post("/api/payload-calib")
+    assert r.status_code == 412
+    assert r.get_json()["ok"] is False
+
+
+def test_api_payload_calib_with_confirm_returns_200():
+    """传 confirm 后正常 200."""
+    c, _, _ = _client()
+    r = c.post("/api/payload-calib" + _CONFIRM_QUERY)
     assert r.status_code == 200
 
 
-def test_api_payload_calib_returns_ok_true():
-    """Bug 6: /api/payload-calib 现真实触发标定 subprocess, ok=True."""
+def test_api_payload_calib_returns_ok_true_with_confirm():
+    """Bug 6: /api/payload-calib 含 confirm 时真实触发标定, ok=True."""
     c, _, _ = _client()
-    r = c.post("/api/payload-calib")
+    r = c.post("/api/payload-calib" + _CONFIRM_QUERY)
     j = r.get_json()
     assert j["ok"] is True
 
@@ -131,18 +141,18 @@ def test_api_payload_calib_returns_ok_true():
 def test_api_payload_calib_guidance_nonempty():
     """POST /api/payload-calib JSON 含非空 guidance (执行说明)."""
     c, _, _ = _client()
-    r = c.post("/api/payload-calib")
+    r = c.post("/api/payload-calib" + _CONFIRM_QUERY)
     j = r.get_json()
     assert isinstance(j.get("guidance"), str) and len(j["guidance"]) > 0
 
 
 def test_api_payload_calib_enqueues_cmd():
-    """Bug 6: POST /api/payload-calib 入队 'payload_calib' 命令."""
+    """Bug 6: POST /api/payload-calib + confirm 入队 'payload_calib' 命令."""
     events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
     ctl = rc.RecorderController(events=events)
     app = cp.build_app(controller=ctl)
     client = app.test_client()
-    client.post("/api/payload-calib")
+    client.post("/api/payload-calib" + _CONFIRM_QUERY)
     # events dict 全部保持 False (不影响录制事件)
     assert events == {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
     # 命令队列含一条 'payload_calib'
@@ -258,9 +268,9 @@ def test_none_controller_ping_still_200():
 
 
 def test_none_controller_payload_calib_503():
-    """Bug 6: controller=None 时 POST /api/payload-calib 返 503 (现需 controller 入队命令)."""
+    """Bug 6: controller=None 时 POST /api/payload-calib (带 confirm) 返 503."""
     c = _none_client()
-    r = c.post("/api/payload-calib")
+    r = c.post("/api/payload-calib" + _CONFIRM_QUERY)
     assert r.status_code == 503
 
 

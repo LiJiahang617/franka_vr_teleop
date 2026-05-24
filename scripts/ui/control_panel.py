@@ -145,16 +145,39 @@ def build_app(controller=None) -> Flask:
     def _api_payload_calib():
         """Bug 6: 负载标定 - 触发 payload_ident.py subprocess.
 
-        - WAITING 状态才允许 (其他状态会被 _handle_payload_calib_cmd 拒绝)
-        - 命令入队后主线程消费循环跑 subprocess (~4-5 分钟, 17 位姿×2 方向)
-        - stdout 实时塞 _log_tail, UI 前端轮询 /api/status 看进度
-        - 完成后写 npz 到 /home/ubuntu/Desktop/jhli/_payload_ident_v2_out_*.npz
-        - 用户手动填 Franka Desk → End Effector → Mass/COM 后重启 polymetis-rw
+        ⚠️ 安全限制 (Codex 复审 H 提示):
+        - subprocess 跑 17 个位姿 × 双向 = 34 次大角度运动 (~4-5 分钟)
+        - UI Stop 会 kill subprocess, 但 polymetis controller 可能继续执行
+          当前 move 直到完成 (libfranka 设计). **物理急停是唯一可靠停车**.
+        - 必须传 confirm="physical-estop-in-hand" 强制承认风险, 否则 412.
+
+        要求:
+            POST /api/payload-calib?confirm=physical-estop-in-hand
+            或 JSON body: {"confirm": "physical-estop-in-hand"}
         """
+        from flask import request
         err = _require_controller()
         if err is not None:
             return err
-        ok = controller.start_payload_calib()
+
+        # H1+H2 (Codex): 强制 confirm 防止误触
+        confirm = request.args.get("confirm") or (request.get_json(silent=True) or {}).get("confirm")
+        if confirm != "physical-estop-in-hand":
+            return jsonify({
+                "ok": False,
+                "reason": "未确认风险, 需传 confirm=physical-estop-in-hand",
+                "warning": (
+                    "⚠️ 负载辨识将驱动机械臂 ~5 分钟跑 17 位姿×2 方向, "
+                    "幅度较大, 安全 protocol: 人离工作区+物理急停在手. "
+                    "UI Stop 不能立即停车 (polymetis 当前 move 可能继续到目标)."
+                ),
+            }), 412
+
+        # 可选 dry_run 参数: 自测用, 让 payload_ident.py 走 --dry-run 不发任何运动
+        dry_run = (request.args.get("dry_run") or
+                   (request.get_json(silent=True) or {}).get("dry_run"))
+        dry_run = str(dry_run).lower() in ("1", "true", "yes")
+        ok = controller.start_payload_calib(dry_run=dry_run)
         if not ok:
             return jsonify({
                 "ok": False,
@@ -164,7 +187,9 @@ def build_app(controller=None) -> Flask:
             "ok": True,
             "guidance": (
                 "负载辨识已启动 (subprocess 运行 4-5 分钟). "
-                "实时进度看 UI 日志区. 机械臂将慢速跑多位姿, 急停在手! "
+                "实时进度看 UI 日志区. 机械臂将慢速跑多位姿. "
+                "⚠️ UI Stop 仅 kill subprocess, polymetis 当前 move 可能继续, "
+                "物理急停是唯一可靠停车! "
                 "完成后辨识出的 m/c 见日志, 手填 Desk → End Effector → "
                 "Mass + Flange→COM, Activate 后重启 polymetis-rw."
             ),

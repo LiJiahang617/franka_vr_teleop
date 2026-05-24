@@ -83,11 +83,19 @@ class UnityVRReader:
         self.running = False
         self._proc = None
 
-        # Bug 3 preflight: 启动前清残留 adb logcat -s Unity:I 孤儿, 防多进程抢流
-        subprocess.run(["pkill", "-9", "-f", "adb logcat -s Unity:I"],
-                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        import time as _t
-        _t.sleep(0.3)
+        # Bug 3 preflight: 启动前清残留 adb logcat -s Unity:I 孤儿, 防多进程抢流.
+        # M2 (Codex): 用 -u ubuntu 限制为当前用户拥有, 不动其他用户 logcat (公用服务器).
+        # 用 SIGTERM (默认) 而非 SIGKILL, 给 adb 子进程 graceful 关闭 listener 机会;
+        # 0.5s 等 adb 退 (adb 退出比 logcat 快); 再确认死了再 SIGKILL 兜底.
+        import os as _os, time as _t
+        _user = _os.environ.get("USER") or _os.environ.get("LOGNAME") or ""
+        if _user:
+            subprocess.run(["pkill", "-u", _user, "-f", "adb logcat -s Unity:I"],
+                           check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _t.sleep(0.5)
+            subprocess.run(["pkill", "-9", "-u", _user, "-f", "adb logcat -s Unity:I"],
+                           check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _t.sleep(0.2)
         subprocess.run([self.adb, "start-server"], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run([self.adb, "shell", "monkey", "-p", self.package,

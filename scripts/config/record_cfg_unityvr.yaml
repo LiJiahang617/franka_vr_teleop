@@ -129,7 +129,7 @@ record:
     # description: "Pick up the green cube and put it into the trash bin." # task description
     description: "pick up the Shanghai Green and put them into the brown basket" # hdf5 入口现读此 cfg（CLI 仅覆盖）
     # description: "pick up the red chili and put it into the brown basket"
-    num_episodes: 10 # 录制 episode 数; hdf5 入口现读此 cfg（CLI --episodes 仅临时覆盖）
+    num_episodes: 1  # M1 fix: UI 模式每次点开始录此数量条 ep (默认 1=保存后立即回 waiting); terminal 键盘模式 (run_record_hdf5.py) 可设更大批量
     display: True # Whether to display the data during recording
     resume: false # whether to resume from an existing dataset
     resume_dataset: roboticiq/pick_all_yellow_cube_to_brown_basket_20260208_v01 # dataset to resume from if resume is True
