@@ -327,6 +327,10 @@
         <span class="stat-value"><span id="ep_count2">0</span></span>
       </div>
       <div class="stat-row">
+        <span class="stat-label">后台保存队列</span>
+        <span class="stat-value"><span id="saver_pending" style="color:#fbbf24;font-weight:700">0</span> 个排队</span>
+      </div>
+      <div class="stat-row">
         <span class="stat-label">当前帧数</span>
         <span class="stat-value"><span id="frame_count">0</span></span>
       </div>
@@ -414,6 +418,12 @@
           /* 日志 */
           var logs = j.log_tail || [];
           document.getElementById('log').textContent = logs.join('\n');
+
+          /* 后台保存队列 */
+          var pending = j.saver_pending || 0;
+          var pendingEl = document.getElementById('saver_pending');
+          pendingEl.textContent = pending;
+          pendingEl.style.color = pending > 0 ? '#fbbf24' : '#4ade80';
 
           /* VR 臂控状态 (ros2_realman_ws 同款) */
           var vrEn = j.vr_control_enabled === true;

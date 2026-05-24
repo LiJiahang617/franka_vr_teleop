@@ -248,19 +248,46 @@ def main():
     # Bug 2 fix: 把 yaml.reset_between_episodes 闭包捕获, 录制时仅当 True 才让 run_episodes 自动 reset.
     # attach_record_args.reset_fn 永远是 robot.reset (home 按钮始终可用).
     def _wrapped_run_episodes(robot_, teleop_, saver_, **kwargs):
-        """run_episodes 包装：通过 AsyncEpisodeSaver 管理 saver 生命周期。
+        """run_episodes 包装：通过 AsyncEpisodeSaver 管理 saver 生命周期 + UX 进度.
 
         Bug 2: kwargs["reset_fn"] 由 attach_record_args 传入 robot.reset; 但
         若 yaml reset_between_episodes=false, 这里强制覆盖为 None, run_episodes
         ep 间不自动 reset. home 按钮 (_handle_home_cmd) 仍能调 _record_args["reset_fn"].
+
+        UX (2026-05-24): _sink 闭包写 "已落盘" 事件到 controller._log_tail.
         """
+        # saver wrapper 引用 (后台线程 callback 用)
+        _saver_holder = {}
+
         def _sink(path, payload):
+            import os
             write_episode(path, payload["frames"], **payload["meta"])
+            try:
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+            except Exception:
+                size_mb = 0.0
+            controller.on_episode_saved(path, size_mb)
+            # 写盘完成后更新 pending (qsize 在 task_done 之前读, 减 1 才准)
+            sv = _saver_holder.get("s")
+            if sv is not None:
+                try:
+                    controller.on_saver_pending(max(0, sv._q.qsize() - 1))
+                except Exception:
+                    pass
 
         if not reset_between_episodes:
             kwargs["reset_fn"] = None  # 仅切断 run_episodes 的自动 reset
 
         with AsyncEpisodeSaver(sink=_sink, maxsize=5) as saver_real:
+            _saver_holder["s"] = saver_real
+            # patch submit: 入队时 log "入队保存中" + 更新 pending
+            _orig_submit = saver_real.submit
+            def _submit_with_log(path, payload):
+                fn = path.rsplit("/", 1)[-1]
+                controller._log(f"[REC] 入队保存 → {fn} (后台异步写盘)")
+                _orig_submit(path, payload)
+                controller.on_saver_pending(saver_real._q.qsize())
+            saver_real.submit = _submit_with_log
             run_episodes(robot_, teleop_, saver_real, **kwargs)
 
     # 装配录制参数（Task 5 范式：attach_record_args → start()）

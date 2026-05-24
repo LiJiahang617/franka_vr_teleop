@@ -114,6 +114,8 @@ class RecorderController:
         self._preview_thread: Optional[threading.Thread] = None
         self._preview_stop: Optional[threading.Event] = None
         self._preview_paused: bool = False  # recording 时置 True，让 frame_observer 接管
+        # saver 待保存计数 (sink 入队/完成时由 main 注入更新)
+        self._saver_pending: int = 0
 
     # ---------- 按钮动作（写 events dict，等价键盘输入） ----------
 
@@ -232,6 +234,19 @@ class RecorderController:
         rbt.disable_arm_control()
         self._log("[VR] 臂控已禁用 (机械臂保持当前位姿, 仅夹爪可控)")
 
+    def on_episode_saved(self, path: str, size_mb: float = 0.0) -> None:
+        """saver 后台线程完成 write_episode 后调 (line-safe self._log)."""
+        fn = path.rsplit("/", 1)[-1]
+        if size_mb > 0:
+            self._log(f"[REC] ✓ episode 已落盘 → {fn} ({size_mb:.1f} MB)")
+        else:
+            self._log(f"[REC] ✓ episode 已落盘 → {fn}")
+
+    def on_saver_pending(self, count: int) -> None:
+        """saver 入队后更新待保存计数. count = saver._q.qsize()."""
+        with self._lock:
+            self._saver_pending = count
+
     def is_vr_control_enabled(self) -> bool:
         """查 VR 臂控是否启用 (status_snapshot 用)."""
         if self._record_args is None:
@@ -287,6 +302,7 @@ class RecorderController:
                 "frame_count": self._frame_count,
                 "duration_sec": self._duration_sec,
                 "vr_control_enabled": self.is_vr_control_enabled(),
+                "saver_pending": self._saver_pending,
             }
 
     def update_latest_frame(self, cam_name: str, rgb: "np.ndarray") -> None:
