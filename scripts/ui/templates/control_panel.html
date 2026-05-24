@@ -295,6 +295,18 @@
         <button id="btn-discard" class="btn btn-red"    onclick="post('/api/discard')">结束并丢弃</button>
         <button id="btn-stop"    class="btn btn-red"    onclick="post('/api/stop')">停止会话</button>
       </div>
+      <!-- VR 控制卡片 (ros2_realman_ws 同款 enable/disable 设计) -->
+      <div class="glass-card">
+        <div class="card-title">VR 臂控</div>
+        <div id="vr-status" style="color:#fca5a5;font-weight:700;margin-bottom:8px;">🔴 VR 臂控未启用</div>
+        <button id="btn-vr-enable"  class="btn btn-green" onclick="post('/api/vr_enable')">启用 VR 控制</button>
+        <button id="btn-vr-disable" class="btn btn-red"   onclick="post('/api/vr_disable')" disabled>禁用 VR 控制</button>
+        <div style="color:#94a3b8;font-size:0.8rem;margin-top:8px;line-height:1.4;">
+          点"启用"后, 戴 VR <b>按住右食指扳机</b>移动末端 (松开锚定). <br>
+          中指扳机控夹爪. 录制不自动启用 VR, 需手动.
+        </div>
+      </div>
+
       <!-- 机械臂卡片（修订 B：含负载标定） -->
       <div class="glass-card">
         <div class="card-title">机械臂</div>
