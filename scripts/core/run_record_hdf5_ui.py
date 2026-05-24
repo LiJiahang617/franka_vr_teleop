@@ -78,6 +78,10 @@ RecorderController = _rc_mod.RecorderController
 log = logging.getLogger("rec_hdf5_ui")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+# Bug 4 fix: Werkzeug access log 每请求一行, 前端 30Hz 轮询 /api/status + 2 路
+# /api/preview ≈ 90 行/秒, 完全淹没真信号. 调到 ERROR 仅留致命错误.
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
 
 def main():
     """UI 模式录制入口：解析 cfg → 装配 controller → 起 Flask 服务器。
@@ -219,10 +223,20 @@ def main():
     controller = RecorderController(events, fps=fps)
 
     # _wrapped_run_episodes：用真 saver + 真 run_episodes，内部管理 AsyncEpisodeSaver 生命周期
+    # Bug 2 fix: 把 yaml.reset_between_episodes 闭包捕获, 录制时仅当 True 才让 run_episodes 自动 reset.
+    # attach_record_args.reset_fn 永远是 robot.reset (home 按钮始终可用).
     def _wrapped_run_episodes(robot_, teleop_, saver_, **kwargs):
-        """run_episodes 包装：通过 AsyncEpisodeSaver 管理 saver 生命周期。"""
+        """run_episodes 包装：通过 AsyncEpisodeSaver 管理 saver 生命周期。
+
+        Bug 2: kwargs["reset_fn"] 由 attach_record_args 传入 robot.reset; 但
+        若 yaml reset_between_episodes=false, 这里强制覆盖为 None, run_episodes
+        ep 间不自动 reset. home 按钮 (_handle_home_cmd) 仍能调 _record_args["reset_fn"].
+        """
         def _sink(path, payload):
             write_episode(path, payload["frames"], **payload["meta"])
+
+        if not reset_between_episodes:
+            kwargs["reset_fn"] = None  # 仅切断 run_episodes 的自动 reset
 
         with AsyncEpisodeSaver(sink=_sink, maxsize=5) as saver_real:
             run_episodes(robot_, teleop_, saver_real, **kwargs)
@@ -242,8 +256,10 @@ def main():
         task_name=task_name,
         oc2base_R=R,
         vr_source=record_cfg.control_mode,
-        episodes=episodes,
-        reset_fn=robot.reset if reset_between_episodes else None,
+        # Bug 2 后续: UI 模式每次点开始只录 1 条 ep, save/discard 后回 waiting 等下次 start.
+        # yaml.task.num_episodes 仅在 terminal 键盘模式有意义 (run_record_hdf5.py 入口).
+        episodes=1,
+        reset_fn=robot.reset,   # Bug 2: home 按钮始终可用; ep 间 auto-reset 由 _wrapped 控
         reset_wait=reset_wait_sec,
     )
 

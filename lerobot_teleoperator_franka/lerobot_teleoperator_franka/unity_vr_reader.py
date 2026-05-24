@@ -83,6 +83,11 @@ class UnityVRReader:
         self.running = False
         self._proc = None
 
+        # Bug 3 preflight: 启动前清残留 adb logcat -s Unity:I 孤儿, 防多进程抢流
+        subprocess.run(["pkill", "-9", "-f", "adb logcat -s Unity:I"],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import time as _t
+        _t.sleep(0.3)
         subprocess.run([self.adb, "start-server"], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run([self.adb, "shell", "monkey", "-p", self.package,
@@ -118,9 +123,21 @@ class UnityVRReader:
             return tr, dict(self._last_btn)
 
     def stop(self):
+        """鲁棒清理 adb logcat 子进程, 防孤儿进程累积抢 logcat 流.
+
+        Bug 3 root cause: terminate() 不保证 adb 子进程立即退; main 异常退/Ctrl+C
+        时 __del__ 未必触发, 多次启停后累积 N 个孤儿 adb 进程争抢同一 logcat 流,
+        新 reader 拿到的数据残缺 -> trigger 状态不稳 -> 遥操失效.
+        修复: kill() (SIGKILL) + wait() 确保进程真退.
+        """
         self.running = False
         if self._proc is not None:
-            self._proc.terminate()
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=2.0)
+            except Exception:
+                pass
+            self._proc = None
 
     def __del__(self):
         try:

@@ -178,6 +178,24 @@ class RecorderController:
             self._log("UI go_home: 命令队列已满，丢弃 'home'")
             return False
 
+    def start_payload_calib(self) -> bool:
+        """Bug 6: 启动负载标定 subprocess (payload_ident.py).
+
+        - 入队 'payload_calib', 主线程消费时切 CALIBRATING 状态
+        - subprocess 用 polymetis-local Python 跑 payload_ident.py (~4-5 分钟)
+        - stdout 流式塞 _log_tail; 完成后切回 WAITING
+
+        Returns:
+            True 命令成功入队; False 命令队列已满.
+        """
+        try:
+            self._cmd_q.put_nowait("payload_calib")
+            self._log("UI start_payload_calib: 命令入队 'payload_calib'")
+            return True
+        except queue.Full:
+            self._log("UI start_payload_calib: 命令队列已满, 丢弃")
+            return False
+
     # ---------- 状态/帧缓存 ----------
 
     def increment_episode_count(self) -> None:
@@ -238,8 +256,15 @@ class RecorderController:
             fps: preview 采样率，默认 30Hz（与录制 fps 同源；若与 record 主循环冲突
                  可降到 10Hz 或加 pause/resume 让 frame_observer 接管）
         """
+        # Codex M (M4) fix: 若已启动+仍 alive, 直接返; 若 stale (thread 已死) 先清再启
         if self._preview_thread is not None:
-            return  # 已启动
+            if self._preview_thread.is_alive():
+                return  # 已启动
+            try:
+                self._preview_thread.join(timeout=0.2)
+            except Exception:
+                pass
+            self._preview_thread = None
         self._preview_stop = threading.Event()
 
         def _loop():
@@ -389,6 +414,8 @@ class RecorderController:
                 self._handle_start_cmd()
             elif cmd == "home":
                 self._handle_home_cmd()
+            elif cmd == "payload_calib":
+                self._handle_payload_calib_cmd()
             else:
                 log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
         log.info("[RecorderController] 主线程命令消费循环退出")
@@ -467,7 +494,11 @@ class RecorderController:
             self._sm.transition(UIState.RECORDING)
         except IllegalTransition as e:
             log.error(f"[RecorderController] _handle_start_cmd 切 RECORDING 失败: {e}; 拒绝调 run_fn")
+            self._log(f"[REC] 启动失败: {e}")
             return
+        # Bug 5: 录制启动事件 → _log_tail → UI 实时显示
+        next_ep = self._ep_count
+        self._log(f"[REC] 开始录制 episode #{next_ep}")
 
         # 录制前完全停 preview sampler 并等其退出，让 cam pipeline 释放
         self.stop_preview_sampler(timeout=2.0)
@@ -503,6 +534,14 @@ class RecorderController:
         # 缺陷 1 修复：decide 闭包复用 EpisodeDecider，与 run_record_hdf5.main 写法等价
         def decide(ep):
             action = dec.decide_after_episode()
+            # Bug 5: 决策事件 → UI 实时显示
+            frames_recorded = frame_state["count"]
+            if action == "keep":
+                self._log(f"[REC] episode #{ep} 保存中（{frames_recorded} 帧）...")
+            elif action == "discard":
+                self._log(f"[REC] episode #{ep} 已丢弃（{frames_recorded} 帧）")
+            elif action == "stop":
+                self._log(f"[REC] 收到停止信号，退出录制（{frames_recorded} 帧）")
             # stop 不 reset：stop_recording 是全局停止标志，保留让 run_episodes 跳出循环
             if action in ("keep", "discard"):
                 dec.reset_episode_flags()
@@ -554,20 +593,83 @@ class RecorderController:
             except IllegalTransition as e:
                 log.warning(f"[RecorderController] _handle_start_cmd finally 状态回退失败: {e}")
 
+    def _handle_payload_calib_cmd(self) -> None:
+        """Bug 6: 跑 payload_ident.py subprocess, stdout 实时写 _log_tail.
+
+        关键点:
+        - 用 polymetis-local Python (env A 隔离, env A 无 polymetis 包)
+        - 状态机 WAITING → CALIBRATING, 完成后切回 WAITING
+        - subprocess.Popen 行缓冲, 主线程阻塞读 stdout (在 consume 主线程, ~4-5 min)
+        - 标定期 stop_recording 调用会让命令循环退出但 subprocess 继续, finally 终止
+        """
+        import subprocess as _sp
+
+        try:
+            self._sm.transition(UIState.CALIBRATING)
+        except IllegalTransition as e:
+            log.error(f"[CALIB] 状态切 CALIBRATING 失败: {e}; 拒绝标定")
+            self._log(f"[CALIB] 启动失败 (状态非 WAITING): {e}")
+            return
+
+        py = "/home/ubuntu/Desktop/jhli/envs/polymetis-local/bin/python"
+        script = "/home/ubuntu/Desktop/jhli/payload_identification/payload_ident.py"
+        cmd = [py, script]
+        self._log("[CALIB] 启动负载辨识 subprocess (~4-5 分钟, 17 位姿×2 方向)...")
+        self._log("[CALIB] 警告: 机械臂将慢速跑多位姿, 人离工作区, 急停在手!")
+
+        proc = None
+        try:
+            proc = _sp.Popen(
+                cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT,
+                bufsize=1, text=True,
+                cwd="/home/ubuntu/Desktop/jhli/payload_identification",
+            )
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self._log(f"[CALIB] {line}")
+                if self._should_stop:
+                    self._log("[CALIB] 收到停止信号, 杀 subprocess")
+                    proc.kill()
+                    break
+            ret = proc.wait()
+            if ret == 0:
+                self._log("[CALIB] 辨识完成 ✓ 见输出 npz, 填 Desk 后重启 polymetis-rw")
+            else:
+                self._log(f"[CALIB] subprocess 退出 code={ret}")
+        except Exception as e:
+            log.exception("[CALIB] subprocess 异常")
+            self._log(f"[CALIB] 异常: {type(e).__name__}: {e}")
+            if proc is not None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        finally:
+            try:
+                self._sm.transition(UIState.WAITING)
+            except IllegalTransition as e:
+                log.warning(f"[CALIB] 状态回 WAITING 失败 (可能已停): {e}")
+
     def _handle_home_cmd(self) -> None:
         """处理 'home' 命令：串行调用 reset_fn（守坑 7，不在 UI 线程直调 zerorpc）。"""
         if self._record_args is None:
             log.error("[RecorderController] attach_record_args 未调用，无法 home")
+            self._log("[HOME] 失败: attach_record_args 未调用")
             return
 
         reset_fn = self._record_args.get("reset_fn")
         if reset_fn is not None:
+            self._log("[HOME] 回 home 中...")
             try:
                 reset_fn()
+                self._log("[HOME] 回 home 完成")
             except Exception as exc:
                 log.exception(f"[RecorderController] reset_fn 异常: {exc}")
+                self._log(f"[HOME] 失败: {type(exc).__name__}: {exc}")
         else:
             log.warning("[RecorderController] 'home' 命令：reset_fn 未配置，跳过")
+            self._log("[HOME] 跳过（reset_fn 未配置, 检查 yaml reset_between_episodes）")
 
     # ---------- 内部辅助 ----------
 

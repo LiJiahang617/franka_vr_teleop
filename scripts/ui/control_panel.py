@@ -143,16 +143,31 @@ def build_app(controller=None) -> Flask:
 
     @app.route("/api/payload-calib", methods=["POST"])
     def _api_payload_calib():
-        """负载标定占位路由（扩展位，无副作用）。
+        """Bug 6: 负载标定 - 触发 payload_ident.py subprocess.
 
-        当前不调任何机器人接口，直接返回引导文案。
-        不写 events dict，不写命令队列。
-        后续若 franka_interface_server 暴露 set_load 接口再接入真实功能。
+        - WAITING 状态才允许 (其他状态会被 _handle_payload_calib_cmd 拒绝)
+        - 命令入队后主线程消费循环跑 subprocess (~4-5 分钟, 17 位姿×2 方向)
+        - stdout 实时塞 _log_tail, UI 前端轮询 /api/status 看进度
+        - 完成后写 npz 到 /home/ubuntu/Desktop/jhli/_payload_ident_v2_out_*.npz
+        - 用户手动填 Franka Desk → End Effector → Mass/COM 后重启 polymetis-rw
         """
+        err = _require_controller()
+        if err is not None:
+            return err
+        ok = controller.start_payload_calib()
+        if not ok:
+            return jsonify({
+                "ok": False,
+                "reason": "命令队列已满, 请稍后重试",
+            }), 503
         return jsonify({
             "ok": True,
-            "supported": False,
-            "guidance": _PAYLOAD_CALIB_GUIDANCE,
+            "guidance": (
+                "负载辨识已启动 (subprocess 运行 4-5 分钟). "
+                "实时进度看 UI 日志区. 机械臂将慢速跑多位姿, 急停在手! "
+                "完成后辨识出的 m/c 见日志, 手填 Desk → End Effector → "
+                "Mass + Flange→COM, Activate 后重启 polymetis-rw."
+            ),
         })
 
     # ---------- Task 3：相机预览路由 ----------

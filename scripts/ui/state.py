@@ -21,6 +21,7 @@ class UIState(str, Enum):
     CONFIRMING = "confirming"
     SAVING = "saving"
     READY = "ready"
+    CALIBRATING = "calibrating"  # Bug 6: 负载标定子进程运行中, 阻止 start/home/stop
 
 
 class IllegalTransition(RuntimeError):
@@ -30,11 +31,12 @@ class IllegalTransition(RuntimeError):
 # 合法转移表：每个状态可到达的目标状态集合
 _LEGAL: dict[UIState, set[UIState]] = {
     UIState.INITIALIZING: {UIState.WAITING},
-    UIState.WAITING:      {UIState.RECORDING},
+    UIState.WAITING:      {UIState.RECORDING, UIState.CALIBRATING},   # Bug 6: + 标定
     UIState.RECORDING:    {UIState.CONFIRMING},
     UIState.CONFIRMING:   {UIState.SAVING, UIState.WAITING},   # WAITING 对应丢弃分支
     UIState.SAVING:       {UIState.READY},
     UIState.READY:        {UIState.WAITING},
+    UIState.CALIBRATING:  {UIState.WAITING},                   # Bug 6: 标定完→等待
 }
 
 

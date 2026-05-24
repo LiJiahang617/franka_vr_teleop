@@ -120,33 +120,34 @@ def test_api_payload_calib_returns_200():
     assert r.status_code == 200
 
 
-def test_api_payload_calib_supported_false():
-    """POST /api/payload-calib JSON 含 supported=False（明确标识为扩展位）。"""
+def test_api_payload_calib_returns_ok_true():
+    """Bug 6: /api/payload-calib 现真实触发标定 subprocess, ok=True."""
     c, _, _ = _client()
     r = c.post("/api/payload-calib")
     j = r.get_json()
-    assert j["supported"] is False
+    assert j["ok"] is True
 
 
 def test_api_payload_calib_guidance_nonempty():
-    """POST /api/payload-calib JSON 含非空字符串 guidance（用户引导文案）。"""
+    """POST /api/payload-calib JSON 含非空 guidance (执行说明)."""
     c, _, _ = _client()
     r = c.post("/api/payload-calib")
     j = r.get_json()
     assert isinstance(j.get("guidance"), str) and len(j["guidance"]) > 0
 
 
-def test_api_payload_calib_no_side_effects():
-    """POST /api/payload-calib 不写 events dict，不写命令队列（无副作用）。"""
+def test_api_payload_calib_enqueues_cmd():
+    """Bug 6: POST /api/payload-calib 入队 'payload_calib' 命令."""
     events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
     ctl = rc.RecorderController(events=events)
     app = cp.build_app(controller=ctl)
     client = app.test_client()
     client.post("/api/payload-calib")
-    # events dict 全部保持 False
+    # events dict 全部保持 False (不影响录制事件)
     assert events == {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
-    # 命令队列为空
-    assert ctl._cmd_q.empty()
+    # 命令队列含一条 'payload_calib'
+    assert not ctl._cmd_q.empty()
+    assert ctl._cmd_q.get_nowait() == "payload_calib"
 """
 Task 2 修复新增测试（追加到 test_ui_routes.py 末尾）。
 
@@ -256,11 +257,11 @@ def test_none_controller_ping_still_200():
     assert r.get_json()["ok"] is True
 
 
-def test_none_controller_payload_calib_still_200():
-    """controller=None 时 POST /api/payload-calib 仍返回 200（不依赖 controller）。"""
+def test_none_controller_payload_calib_503():
+    """Bug 6: controller=None 时 POST /api/payload-calib 返 503 (现需 controller 入队命令)."""
     c = _none_client()
     r = c.post("/api/payload-calib")
-    assert r.status_code == 200
+    assert r.status_code == 503
 
 
 # ==================== 命令队列满时返回 503 ====================
