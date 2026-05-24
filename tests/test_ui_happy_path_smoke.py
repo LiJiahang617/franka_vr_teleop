@@ -81,7 +81,7 @@ def test_happy_path_start_to_stop_all_routes_survive():
     6. GET /api/preview/wrist_image → 返回合法 JSON（无帧时返回 404 或 200 含 null）
     7. POST /api/stop → 200，events[stop_recording]=True
     8. Cache-Control 头在每条响应中均存在
-    9. 后台线程可 start → wait_until_done 完成（无阻塞）
+    9. prepare + consume_commands_blocking 主循环可消费命令并退出（无阻塞）
     """
     client, ctl, events, runner = _make_setup()
 
@@ -148,7 +148,9 @@ def test_happy_path_start_to_stop_all_routes_survive():
             f"{method} {path} 响应缺 Cache-Control no-store（红线）: {cc!r}"
         )
 
-    # 9. 后台线程 start → run_episodes_fn 被调用 → wait_until_done 不阻塞
+    # 9. 新路径: prepare + 子线程跑 consume_commands_blocking 模拟主线程消费
+    #    (旧 daemon 路径 start()/wait_until_done() 已删, 见 recorder_controller 文档串)
+    import threading as _threading
     events2 = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
     runner2 = FakeRunner()
     ctl2 = _rc.RecorderController(events=events2)
@@ -169,8 +171,12 @@ def test_happy_path_start_to_stop_all_routes_survive():
         reset_fn=None,
         reset_wait=0.0,
     )
+    ctl2.prepare()  # 切状态机 INITIALIZING → WAITING
+    consumer = _threading.Thread(
+        target=ctl2.consume_commands_blocking, daemon=True, name="smoke-consumer"
+    )
+    consumer.start()
     ctl2.start_recording()  # 入队 "start"
-    ctl2.start()            # 起后台线程
 
     # 等 FakeRunner 跑完（episodes=1，sleep 0.05s×2=约 0.1s）
     deadline = time.monotonic() + 2.0
@@ -178,11 +184,7 @@ def test_happy_path_start_to_stop_all_routes_survive():
         time.sleep(0.02)
     assert runner2.calls == 1, f"run_episodes_fn 未被调用，calls={runner2.calls}"
 
-    # 通知后台命令循环退出（_should_stop=True），再 join
+    # 通知 consume 主循环退出（_should_stop=True），再 join
     ctl2.stop_recording()
-    thread_ref = ctl2._recorder_thread  # join 前先拿引用
-    ctl2.wait_until_done(timeout=3.0)
-    # thread_ref.is_alive() should be False（已正常退出）
-    assert thread_ref is None or not thread_ref.is_alive(), (
-        "wait_until_done 后后台线程仍在运行"
-    )
+    consumer.join(timeout=3.0)
+    assert not consumer.is_alive(), "consume_commands_blocking 退出失败, 线程仍 alive"

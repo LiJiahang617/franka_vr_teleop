@@ -6,7 +6,7 @@ RecorderController：UI 与录制器之间的桥梁。
 - 持有命令队列（start/home 走队列，由 Task 5 录制器主循环串行消费；守坑 7 不直调 zerorpc）
 - 持有状态机（Task 1 的 StateMachine）
 - 线程安全：episode_count / latest_frames / log_tail / frame_count / duration_sec 均在 _lock 下操作
-- 录制器线程在 Task 5 接入（attach_record_args + start + _record_main）
+- 录制器主循环在主线程消费 (attach_record_args + prepare + consume_commands_blocking)
 """
 import collections
 import importlib.util
@@ -66,9 +66,8 @@ class RecorderController:
         _fps: 录制帧率（UI 状态显示用）。
         _log_tail: 近 200 条日志（环形缓冲）。
         _latest_frames: cam_name → ndarray RGB（Task 5 填充，Task 3 读取）。
-        _recorder_thread: 录制器线程（Task 5 接入）。
         _record_args: attach_record_args 保存的录制参数字典。
-        _should_stop: 后台线程退出标志（仅 _record_main 命令循环用）。
+        _should_stop: 主线程命令消费循环退出标志 (stop_recording() 置位)。
         _frame_count: 当前 episode 已录帧数（status_snapshot 暴露）。
         _duration_sec: 当前 episode 已录时长（秒）（status_snapshot 暴露）。
         _first_cam: cam_names[0]，用于 frame_observer 判断「新帧」（缺陷 2 修复）。
@@ -98,10 +97,8 @@ class RecorderController:
         self._log_tail: collections.deque = collections.deque(maxlen=200)
         # cam_name → ndarray RGB；Task 5 由录制器主循环 hook 写入
         self._latest_frames: dict = {}
-        # Task 5 接入录制器线程
-        self._recorder_thread: Optional[threading.Thread] = None
         self._record_args: Optional[dict] = None
-        # _should_stop 仅用于 _record_main 命令消费循环的退出
+        # _should_stop 用于 consume_commands_blocking 主循环的退出
         self._should_stop: bool = False
         # 当前 episode 进度（status_snapshot 暴露给 Task 4 前端）
         self._frame_count: int = 0
@@ -141,7 +138,7 @@ class RecorderController:
         """停止整个录制会话（等价键盘 Esc 键 stop）。
 
         写入 stop_recording=True + exit_early=True，EpisodeDecider 判定为 stop→break 循环。
-        同时置 _should_stop=True 通知后台线程命令循环退出。
+        同时置 _should_stop=True 通知主线程命令循环退出。
         """
         self._events["stop_recording"] = True
         self._events["exit_early"] = True
@@ -400,7 +397,7 @@ class RecorderController:
                            fps, episode_sec, gripper_max_open, cam_names,
                            out_dir, task_name, oc2base_R, vr_source,
                            episodes, reset_fn=None, reset_wait=0.0) -> None:
-        """装载录制参数（start() 前调用，后台线程消费）。
+        """装载录制参数 (prepare() 前调用, 主线程 consume_commands_blocking 消费)。
 
         Args:
             robot: Franka 实例（或 Fake）。
@@ -439,27 +436,6 @@ class RecorderController:
         )
         # 缺陷 2：记录第一路相机名，用于 frame_observer 判断「新帧」
         self._first_cam = cam_names[0] if cam_names else None
-
-    def start(self) -> None:
-        """启动后台录制线程消费命令队列（兼容旧 API，单测用）。
-
-        ⚠️ 真机入口不要调此方法——daemon thread 调 zerorpc 会触发 gevent
-        thread-affinity 死锁（lesson 2026-05-24-phaseE-ui-zerorpc-gevent-daemon-thread.md）。
-        真机入口请用 `prepare()` + `consume_commands_blocking()` 组合。
-
-        状态机：INITIALIZING → WAITING。
-        """
-        self._should_stop = False
-        # H4 顺带 fix: 先切状态机再启 daemon，避免 daemon 先于 transition 到达
-        # _handle_start_cmd 时撞上 INITIALIZING → RECORDING 非法迁移。
-        try:
-            self._sm.transition(UIState.WAITING)
-        except IllegalTransition as e:
-            log.warning(f"[RecorderController] start() 状态切换失败: {e}")
-        self._recorder_thread = threading.Thread(
-            target=self._record_main, daemon=True, name="recorder-main"
-        )
-        self._recorder_thread.start()
 
     def prepare(self) -> None:
         """仅切状态机 INITIALIZING → WAITING，不启 daemon thread（真机入口用）。
@@ -510,20 +486,6 @@ class RecorderController:
                 log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
         log.info("[RecorderController] 主线程命令消费循环退出")
 
-    def wait_until_done(self, timeout: float = 5.0) -> None:
-        """等待后台线程退出（join with timeout，无僵尸线程）。
-
-        Args:
-            timeout: join 超时秒数，超时后仅打警告，不抛异常。
-        """
-        t = self._recorder_thread
-        if t is None:
-            return
-        t.join(timeout)
-        if t.is_alive():
-            log.warning("[RecorderController] 后台录制线程 join 超时，仍在运行")
-        self._recorder_thread = None
-
     def update_recording_progress(self, *, frame_count: int, duration_sec: float) -> None:
         """更新当前 episode 录制进度（后台线程 frame_observer 调用，线程安全）。
 
@@ -540,27 +502,6 @@ class RecorderController:
         with self._lock:
             self._frame_count = 0
             self._duration_sec = 0.0
-
-    def _record_main(self) -> None:
-        """后台录制线程主循环：消费命令队列，串行执行 start/home 命令。
-
-        - 'start'：调用 run_episodes_fn（真机或 Fake），传入 frame_observer hook。
-        - 'home'：串行调用 reset_fn（守坑 7：UI 线程不直调 zerorpc）。
-        - 其他命令：丢弃并记日志。
-        - _should_stop=True 时退出循环。
-        """
-        while not self._should_stop:
-            try:
-                cmd = self._cmd_q.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
-            if cmd == "start":
-                self._handle_start_cmd()
-            elif cmd == "home":
-                self._handle_home_cmd()
-            else:
-                log.warning(f"[RecorderController] 未知命令: {cmd!r}，忽略")
 
     def _handle_start_cmd(self) -> None:
         """处理 'start' 命令：调用 run_episodes_fn 执行录制。
