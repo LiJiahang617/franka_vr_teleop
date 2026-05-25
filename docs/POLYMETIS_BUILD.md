@@ -23,6 +23,14 @@ git clone https://github.com/LiJiahang617/fairo-franka.git
 cd fairo-franka/polymetis/polymetis
 ```
 
+> ⚠️ **不要加 `--recursive`**。upstream fairo 是 Meta 的 monorepo，带了一堆与 Franka 无关的
+> submodule（`droidlet/*` Minecraft AI、`perception/sandbox/polygrasp/*` 抓取感知、
+> `psyonic_gripper/ability-hand-api` 假肢手等），其中几个用 `git@github.com:` SSH URL，没配
+> SSH key 一定 fail。Franka VR teleop 不需要任何 submodule，普通 clone 即可。
+>
+> 如果误用了 `--recursive` 且卡在 submodule，`rm -rf fairo-franka` 后重新不带 `--recursive`
+> clone；或在已有目录内执行 `git submodule deinit -f --all && git checkout .` 清理。
+
 > 用 fork 是因为 upstream Meta fairo-franka 已停止维护，本项目用的版本含
 > `hw_timestamp` 硬件时间戳 + `setLoad` 暴露等定制。
 
